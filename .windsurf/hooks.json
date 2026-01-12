@@ -1,0 +1,55 @@
+{
+  "$schema": "https://windsurf.ai/schemas/hooks.json",
+  "version": "1.0",
+  "description": "Eliza Development Workflow Enforcement Hooks",
+  "hooks": [
+    {
+      "name": "eliza_pre_write_validation",
+      "type": "pre_write_code",
+      "description": "Validates workflow state and code before writing Eliza files",
+      "command": "python",
+      "args": ["scripts/validate_before_write.py"],
+      "workingDir": "${workspaceFolder}",
+      "enabled": true,
+      "blocking": true,
+      "timeout": 30000,
+      "filePatterns": [
+        "**/*.nugget.js",
+        "**/*.nugget.ts",
+        "**/nuggets/**/*.js",
+        "**/nuggets/**/*.ts",
+        "**/*nugget*.js",
+        "**/*nugget*.ts",
+        "**/*eliza*.py",
+        "**/*agent*.py"
+      ]
+    },
+    {
+      "name": "eliza_post_write_validation",
+      "type": "post_write_code",
+      "description": "Validates Eliza code after writing and updates workflow state",
+      "command": "python",
+      "args": ["scripts/validate_nuggets_after_write.py"],
+      "workingDir": "${workspaceFolder}",
+      "enabled": true,
+      "blocking": true,
+      "timeout": 60000,
+      "filePatterns": [
+        "**/*.nugget.js",
+        "**/*.nugget.ts",
+        "**/nuggets/**/*.js",
+        "**/nuggets/**/*.ts",
+        "**/*nugget*.js",
+        "**/*nugget*.ts",
+        "**/*eliza*.py",
+        "**/*agent*.py"
+      ]
+    }
+  ],
+  "settings": {
+    "debug": false,
+    "logLevel": "info",
+    "continueOnWarning": true,
+    "failOnUnknownHook": false
+  }
+}

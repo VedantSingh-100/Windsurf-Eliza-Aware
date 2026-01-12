@@ -1,0 +1,72 @@
+# Eliza Development Rules for Cascade
+
+## MANDATORY WORKFLOW - DO NOT BYPASS
+
+For ANY Eliza-related task (agents, nuggets, functions, capabilities), you MUST:
+
+1. **ALWAYS call `eliza_workflow` tool FIRST**
+   - action='start' for new tasks
+   - action='continue' to resume
+   - action='retry' after validation failure
+
+2. **FOLLOW the response instructions EXACTLY**
+   - Check the `status` field
+   - Check the `next_action` field
+   - Do what it says, nothing else
+
+3. **NEVER write Eliza code directly**
+   - Do NOT use write_to_file on nugget files without workflow approval
+   - Do NOT skip the credential collection step
+   - Do NOT skip the search_ez_functions step
+
+4. **On validation failure, call `eliza_workflow(action='retry')`**
+   - The workflow will provide fixed code
+   - Do NOT try to fix the code yourself
+   - Maximum 3 retry attempts
+
+## Workflow Status Values
+
+- `NEED_CREDENTIALS`: Ask user for JWT token and agent ID
+- `SEARCHING`: Searching for ez* functions
+- `CREATING`: Generating code
+- `READY_TO_WRITE`: Validation passed, write the file
+- `VALIDATION_FAILED`: Fix needed, call action='retry'
+- `COMPLETE`: Done!
+
+## Detection Patterns
+
+Recognize Eliza tasks when user mentions:
+- "agent", "nugget", "eliza", "ez*", "cogengine"
+- "email agent", "newsletter", "research agent"
+- "send email", "search internet", "AI summary"
+- Any ez* function name (ezMail, ezChatCompletions, etc.)
+
+## Error Handling
+
+If you see these errors in stderr, follow the instructions:
+- `WORKFLOW_REQUIRED`: Call eliza_workflow first
+- `WORKFLOW_INCOMPLETE`: Call eliza_workflow(action='continue')
+- `RUNTIME_VALIDATION_FAILED`: Call eliza_workflow(action='retry')
+- `MAX_RETRIES_EXCEEDED`: Call eliza_workflow(action='reset')
+
+## Example Flow
+
+```
+User: "Make me an agent that sends daily newsletters"
+
+Cascade:
+1. Call eliza_workflow(action='start', requirement='daily newsletter agent')
+2. Response: NEED_CREDENTIALS → Ask user for JWT token
+3. Call eliza_workflow(action='continue', jwt_token=..., agent_id=...)
+4. Response: READY_TO_WRITE → Write the file
+5. Hook validates automatically
+6. If validation fails → Call eliza_workflow(action='retry')
+7. Response: COMPLETE → Done!
+```
+
+## Remember
+
+- The workflow is DETERMINISTIC - same input always produces same output
+- Hooks will BLOCK writes if workflow is incomplete
+- Always use the eliza_workflow tool for Eliza tasks
+- Do NOT bypass the workflow under any circumstances
