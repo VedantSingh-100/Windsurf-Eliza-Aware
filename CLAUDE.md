@@ -35,7 +35,7 @@ python server.py
 
 **State persists in:** `.eliza/workflow_state.json`
 
-### 27 MCP Tools (Consolidated)
+### 46 MCP Tools (Consolidated)
 
 | Category | Tools |
 |----------|-------|
@@ -47,14 +47,52 @@ python server.py
 | Reference | `get_api_endpoint`, `get_valid_values` |
 | Capabilities | 6 category tools (Communication, Integration, AI, Automation, Data, Interop) |
 | CRUD | 11 tools for Agent/Nugget/Function operations |
+| Operations | 19 category tools (75 API endpoints - see below) |
+
+### Operation Tools (Standalone - No workflow required)
+
+These tools expose 75 API endpoints via a category+operation pattern:
+
+**Original 7 Operation Tools:**
+| Tool | Operations | Use for |
+|------|------------|---------|
+| `chat_operations` | chat, query, bulk, bulk_extended | Chat/query agents |
+| `analytics_operations` | activity, users, analytics, all_users, history, top_questions | Usage analytics |
+| `a2a_operations` | register, register_to_agent, list, delete | A2A server management |
+| `nugget_execution` | call, call_dynamic, call_bulk, search | Execute existing nuggets |
+| `document_extended` | get, download, download_figure, get_metadata, create_metadata, update_metadata, reindex | Extended doc operations |
+| `chunk_operations` | update, delete, create_virtual | Chunk management |
+| `system_operations` | get_models, get_chunking_strategies, get_agent_users, get_initiatives | System info |
+
+**New 12 Operation Tools:**
+| Tool | Operations | Use for |
+|------|------------|---------|
+| `agent_crud` | create, get, update, delete, list, disable | Agent CRUD operations |
+| `nugget_crud` | create, get, update, delete | Nugget CRUD operations |
+| `function_crud` | add, get, delete, list | Function CRUD operations |
+| `document_crud` | list, search, delete, upload, upload_index | Document CRUD operations |
+| `identity_operations` | add, delete | Agent identity management |
+| `access_operations` | add_agent_access, remove_agent_access, add_auth_access, remove_auth_access | Access control |
+| `ideas_operations` | get_ideas, vote, delete, upvote | Ideas and voting |
+| `hashes_operations` | list, create, get, delete | Merkle DAG hashes |
+| `index_operations` | search, search_cosmosdb | Vector index search |
+| `promotion_operations` | promote, import | Agent promotion/import |
+| `advanced_operations` | back_testing, computer_use, call_resource | Advanced features |
+| `discovery_operations` | by_control_flag, by_app_id, datasources | Agent discovery |
+
+**When to use:** Operations are for USING existing artifacts (chat, execute, query). Use `eliza_workflow` for CREATING new artifacts (nuggets, agents, functions).
+
+**Scalable architecture:** Add new endpoints by updating `tools/registry/tool_registry.py` - no new handler code needed.
 
 ### Key Directories
 
-- `tools/` - All 27 MCP tool implementations, `workflow.py` is the orchestrator
+- `tools/` - All 46 MCP tool implementations, `workflow.py` is the orchestrator
+- `tools/registry/` - Scalable tool registry and category router for operation tools
+- `tools/operations/` - Operation tool exports (19 handlers)
 - `validation/` - AST-based code validation (no execution), input validators
 - `codegen/` - JavaScript nugget generator with security sanitization
 - `search/` - EZ function registry (`index.py`) and BM25-style search
-- `api/` - ElizaClient for CogEngine HTTP calls
+- `api/` - ElizaClient for CogEngine HTTP calls (75 methods, 19 categories)
 - `scripts/` - Hook scripts and test runner
 
 ### Hook System

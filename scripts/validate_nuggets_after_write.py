@@ -42,7 +42,13 @@ try:
         add_retry_error,
         can_retry,
         WorkflowStep,
-        save_state
+        save_state,
+        # V2.0 multi-artifact functions
+        get_artifact_by_path,
+        get_active_artifact,
+        update_artifact_step,
+        update_artifact_retry,
+        can_artifact_retry,
     )
     WORKFLOW_AVAILABLE = True
 except ImportError:
@@ -112,15 +118,18 @@ def find_workspace_root(file_path: str) -> str:
     return os.path.dirname(os.path.abspath(file_path))
 
 
-def update_workflow_after_validation(workspace: str, passed: bool, errors: list[str] = None, fix_suggestion: str = "") -> dict:
+def update_workflow_after_validation(workspace: str, passed: bool, errors: list[str] = None, fix_suggestion: str = "", file_path: str = None) -> dict:
     """
     Update workflow state after validation completes.
+
+    V2.0: Updates specific artifact identified by file_path.
 
     Args:
         workspace: Path to workspace directory
         passed: Whether validation passed
         errors: List of error messages (if failed)
         fix_suggestion: Suggested fix for the error
+        file_path: Path to the file being validated (for v2.0 artifact lookup)
 
     Returns:
         Updated state dict (or empty dict if workflow not available)
@@ -128,6 +137,57 @@ def update_workflow_after_validation(workspace: str, passed: bool, errors: list[
     if not WORKFLOW_AVAILABLE:
         return {}
 
+    state = get_or_create_state(workspace)
+
+    # V2.0 multi-artifact workflow
+    if state.get("version") == "2.0":
+        # Look up artifact by file path
+        artifact = None
+        if file_path:
+            artifact = get_artifact_by_path(state, file_path)
+        if artifact is None:
+            artifact = get_active_artifact(state)
+
+        if artifact is None:
+            # No artifact found - fall back to legacy behavior
+            return _update_workflow_v1(workspace, passed, errors, fix_suggestion)
+
+        artifact_id = artifact["artifact_id"]
+
+        if passed:
+            # Mark runtime validation as passed for this artifact
+            update_artifact_step(workspace, artifact_id, WorkflowStep.RUNTIME_VALIDATION, "passed")
+            # Mark artifact as complete
+            update_artifact_step(workspace, artifact_id, WorkflowStep.COMPLETE, "passed")
+            # Update artifact status
+            state = get_or_create_state(workspace)
+            artifact = get_artifact_by_path(state, file_path) or get_active_artifact(state)
+            if artifact:
+                artifact["status"] = "deployed"
+                save_state(workspace, state)
+        else:
+            # Mark runtime validation as failed for this artifact
+            update_artifact_step(workspace, artifact_id, WorkflowStep.RUNTIME_VALIDATION, "failed", {"errors": errors})
+
+            # Add to artifact's retry state
+            error_msg = "; ".join(errors) if errors else "Validation failed"
+            update_artifact_retry(workspace, artifact_id, error_msg, fix_suggestion)
+
+            # Update artifact's current step to retry loop
+            state = get_or_create_state(workspace)
+            artifact = get_artifact_by_path(state, file_path) or get_active_artifact(state)
+            if artifact:
+                artifact["workflow_step"] = WorkflowStep.RETRY_LOOP.value
+                save_state(workspace, state)
+
+        return get_or_create_state(workspace)
+    else:
+        # V1.0 single-artifact workflow
+        return _update_workflow_v1(workspace, passed, errors, fix_suggestion)
+
+
+def _update_workflow_v1(workspace: str, passed: bool, errors: list[str] = None, fix_suggestion: str = "") -> dict:
+    """V1.0 legacy workflow update logic."""
     state = get_or_create_state(workspace)
 
     if passed:
@@ -151,9 +211,11 @@ def update_workflow_after_validation(workspace: str, passed: bool, errors: list[
     return get_or_create_state(workspace)
 
 
-def format_retry_error(workspace: str, errors: list[str], fix_suggestion: str = "") -> str:
+def format_retry_error(workspace: str, errors: list[str], fix_suggestion: str = "", file_path: str = None) -> str:
     """
     Format error for Cascade with retry information.
+
+    V2.0: Uses per-artifact retry state.
 
     This creates a structured error message that Cascade can parse
     and use to call eliza_workflow(action='retry').
@@ -162,12 +224,39 @@ def format_retry_error(workspace: str, errors: list[str], fix_suggestion: str = 
         return "\n".join(errors)
 
     state = get_or_create_state(workspace)
-    retry_state = state.get("retry_state", {})
-    attempt = retry_state.get("attempt", 0)
-    max_attempts = retry_state.get("max_attempts", 3)
+
+    # V2.0: Get retry state from specific artifact
+    if state.get("version") == "2.0":
+        artifact = None
+        if file_path:
+            artifact = get_artifact_by_path(state, file_path)
+        if artifact is None:
+            artifact = get_active_artifact(state)
+
+        if artifact:
+            retry_state = artifact.get("retry_state", {})
+            attempt = retry_state.get("attempt", 0)
+            max_attempts = retry_state.get("max_attempts", 3)
+            can_retry_flag = can_artifact_retry(artifact)
+            artifact_label = artifact.get("label", "Unknown")
+        else:
+            retry_state = state.get("retry_state", {})
+            attempt = retry_state.get("attempt", 0)
+            max_attempts = retry_state.get("max_attempts", 3)
+            can_retry_flag = can_retry(state)
+            artifact_label = None
+    else:
+        retry_state = state.get("retry_state", {})
+        attempt = retry_state.get("attempt", 0)
+        max_attempts = retry_state.get("max_attempts", 3)
+        can_retry_flag = can_retry(state)
+        artifact_label = None
 
     output = []
-    output.append(f"RUNTIME_VALIDATION_FAILED (Attempt {attempt}/{max_attempts})")
+    if artifact_label:
+        output.append(f"RUNTIME_VALIDATION_FAILED [{artifact_label}] (Attempt {attempt}/{max_attempts})")
+    else:
+        output.append(f"RUNTIME_VALIDATION_FAILED (Attempt {attempt}/{max_attempts})")
     output.append("")
     output.append("ERRORS:")
     for err in errors:
@@ -179,7 +268,7 @@ def format_retry_error(workspace: str, errors: list[str], fix_suggestion: str = 
         output.append(f"  {fix_suggestion}")
         output.append("")
 
-    if can_retry(state):
+    if can_retry_flag:
         output.append("NEXT: Call eliza_workflow(action='retry') to get fixed code")
     else:
         output.append("MAX_RETRIES_EXCEEDED: Call eliza_workflow(action='reset') to start over")
@@ -601,14 +690,16 @@ def main():
             fix_suggestion = "Provide credentials first, then retry."
 
     # Only update workflow state if workspace exists and is writable
+    # V2.0: Update per-artifact state for each nugget file
     if WORKFLOW_AVAILABLE and nugget_files and os.path.isdir(workspace):
         try:
-            if all_passed:
-                update_workflow_after_validation(workspace, True)
-                print("📋 Workflow state updated: COMPLETE")
-            else:
-                update_workflow_after_validation(workspace, False, all_errors, fix_suggestion)
-                print("📋 Workflow state updated: RETRY_LOOP")
+            for nf in nugget_files:
+                if all_passed:
+                    update_workflow_after_validation(workspace, True, file_path=nf)
+                    print(f"📋 Workflow state updated: COMPLETE ({os.path.basename(nf)})")
+                else:
+                    update_workflow_after_validation(workspace, False, all_errors, fix_suggestion, file_path=nf)
+                    print(f"📋 Workflow state updated: RETRY_LOOP ({os.path.basename(nf)})")
         except (PermissionError, OSError) as e:
             print(f"📋 Workflow state update skipped: {e}")
 
@@ -657,9 +748,10 @@ def main():
                     stderr_errors.append(f"VALIDATION_FAILED file={os.path.basename(nf)} {static_msg.replace(chr(10), ' ')}")
 
         # ===== WORKFLOW-AWARE ERROR FORMATTING (Jan 2026) =====
+        # V2.0: Format retry error with per-artifact info
         if WORKFLOW_AVAILABLE and nugget_files:
-            # Use workflow-formatted retry error
-            retry_error = format_retry_error(workspace, all_errors, fix_suggestion)
+            # Use workflow-formatted retry error (use first nugget file for artifact lookup)
+            retry_error = format_retry_error(workspace, all_errors, fix_suggestion, file_path=nugget_files[0])
             sys.stderr.write(retry_error + "\n\n")
 
         # Write compact errors to stderr (this is what Cascade sees with exit code 2)

@@ -10,8 +10,9 @@ TOOL ARCHITECTURE (Jan 2026):
 - 6 Category tools: Communication, Integration, AI, Automation, Data, Interop
 - 2 Reference tools: API endpoints, valid values
 - 11 CRUD tools: Agent, nugget, and function management
+- 19 Operation tools: Category-based API routing exposing 75 endpoints
 
-Total: 27 tools (reduced from 45, with full CRUD support)
+Total: 46 tools (27 original + 19 operation tools exposing 75 API endpoints)
 
 Usage:
     python -m eliza_mcp.server
@@ -56,6 +57,27 @@ from tools import (
     handle_get_function,
     handle_delete_function,
     handle_list_functions,
+    # Operation tools - Original 7 (category-based API routing)
+    handle_chat_operations,
+    handle_analytics_operations,
+    handle_a2a_operations,
+    handle_nugget_execution,
+    handle_document_extended,
+    handle_chunk_operations,
+    handle_system_operations,
+    # Operation tools - New 12
+    handle_agent_crud,
+    handle_nugget_crud,
+    handle_function_crud,
+    handle_document_crud,
+    handle_identity_operations,
+    handle_access_operations,
+    handle_ideas_operations,
+    handle_hashes_operations,
+    handle_index_operations,
+    handle_promotion_operations,
+    handle_advanced_operations,
+    handle_discovery_operations,
 )
 
 # Create server instance
@@ -175,6 +197,51 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         result = handle_delete_function(arguments)
     elif name == "list_functions":
         result = handle_list_functions(arguments)
+
+    # =========================================================================
+    # OPERATION TOOLS (19) - Category-based API routing
+    # These tools expose 75 API endpoints via operation parameter
+    # =========================================================================
+    # Original 7 operation tools
+    elif name == "chat_operations":
+        result = await handle_chat_operations(arguments)
+    elif name == "analytics_operations":
+        result = await handle_analytics_operations(arguments)
+    elif name == "a2a_operations":
+        result = await handle_a2a_operations(arguments)
+    elif name == "nugget_execution":
+        result = await handle_nugget_execution(arguments)
+    elif name == "document_extended":
+        result = await handle_document_extended(arguments)
+    elif name == "chunk_operations":
+        result = await handle_chunk_operations(arguments)
+    elif name == "system_operations":
+        result = await handle_system_operations(arguments)
+    # New 12 operation tools
+    elif name == "agent_crud":
+        result = await handle_agent_crud(arguments)
+    elif name == "nugget_crud":
+        result = await handle_nugget_crud(arguments)
+    elif name == "function_crud":
+        result = await handle_function_crud(arguments)
+    elif name == "document_crud":
+        result = await handle_document_crud(arguments)
+    elif name == "identity_operations":
+        result = await handle_identity_operations(arguments)
+    elif name == "access_operations":
+        result = await handle_access_operations(arguments)
+    elif name == "ideas_operations":
+        result = await handle_ideas_operations(arguments)
+    elif name == "hashes_operations":
+        result = await handle_hashes_operations(arguments)
+    elif name == "index_operations":
+        result = await handle_index_operations(arguments)
+    elif name == "promotion_operations":
+        result = await handle_promotion_operations(arguments)
+    elif name == "advanced_operations":
+        result = await handle_advanced_operations(arguments)
+    elif name == "discovery_operations":
+        result = await handle_discovery_operations(arguments)
 
     else:
         result = f"Unknown tool: {name}. Available tools: {[t.name for t in ALL_TOOLS]}"

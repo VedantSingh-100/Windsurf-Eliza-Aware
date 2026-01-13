@@ -31,7 +31,10 @@ try:
         load_state,
         get_missing_steps,
         is_step_completed,
-        WorkflowStep
+        WorkflowStep,
+        # V2.0 multi-artifact functions
+        get_artifact_by_path,
+        get_active_artifact,
     )
     WORKFLOW_AVAILABLE = True
 except ImportError:
@@ -162,6 +165,8 @@ def check_workflow_state(workspace: str, file_path: str) -> list[str]:
     """
     Check if workflow state allows writing this file.
 
+    V2.0: Supports multi-artifact workflows. Looks up artifact by file path.
+
     Returns list of errors if workflow is incomplete.
     """
     if not WORKFLOW_AVAILABLE:
@@ -180,41 +185,76 @@ def check_workflow_state(workspace: str, file_path: str) -> list[str]:
         )
         return errors
 
-    # Check mandatory steps
-    missing = get_missing_steps(state)
-    if missing:
-        errors.append(
-            f"WORKFLOW_INCOMPLETE: Missing steps: {', '.join(missing)}. "
-            "Continue the workflow with eliza_workflow(action='continue')."
-        )
-
-    # Check if .env was written
+    # Check shared credentials (same for v1 and v2)
     if not state.get("credentials", {}).get("env_file_written"):
         errors.append(
             "CREDENTIALS_NOT_SAVED: The .env file has not been written. "
             "Complete the credential collection step in the workflow."
         )
 
-    # Check if this file matches the pending write
-    pending = state.get("pending_write", {})
-    expected_path = pending.get("file_path")
-    if expected_path:
-        # Normalize paths for comparison
-        norm_expected = os.path.normpath(expected_path)
-        norm_actual = os.path.normpath(file_path)
-        if norm_expected != norm_actual and not norm_actual.endswith(os.path.basename(norm_expected)):
+    # V2.0 multi-artifact workflow
+    if state.get("version") == "2.0":
+        # Look up artifact by file path
+        artifact = get_artifact_by_path(state, file_path)
+
+        if artifact is None:
+            # Try active artifact as fallback
+            artifact = get_active_artifact(state)
+
+        if artifact is None:
             errors.append(
-                f"UNEXPECTED_FILE: Workflow expects to write '{expected_path}', "
-                f"but attempting to write '{file_path}'. "
-                "Use eliza_workflow to update the target file."
+                f"UNTRACKED_FILE: '{file_path}' is not tracked in workflow state. "
+                "Call eliza_workflow(action='discover') to register existing files, "
+                "or eliza_workflow(action='start', requirement='...') for new files."
+            )
+            return errors
+
+        # Check artifact's pending write
+        pending = artifact.get("pending_write", {})
+        if not pending.get("validated"):
+            errors.append(
+                f"NOT_VALIDATED: Artifact '{artifact.get('label')}' has not been validated. "
+                "Call eliza_workflow(action='continue') to run validation first."
             )
 
-    # Check if pending write is validated
-    if not pending.get("validated"):
-        errors.append(
-            "NOT_VALIDATED: The code has not been validated. "
-            "Call eliza_workflow(action='continue') to run validation first."
-        )
+        # Check artifact's workflow step
+        workflow_step = artifact.get("workflow_step", "INIT")
+        if workflow_step not in ["READY_TO_WRITE", "RUNTIME_VALIDATION", "COMPLETE"]:
+            errors.append(
+                f"WORKFLOW_INCOMPLETE: Artifact '{artifact.get('label')}' is at step '{workflow_step}'. "
+                "Must reach READY_TO_WRITE step before writing. "
+                "Call eliza_workflow(action='continue')."
+            )
+
+    else:
+        # V1.0 single-artifact workflow (legacy behavior)
+        missing = get_missing_steps(state)
+        if missing:
+            errors.append(
+                f"WORKFLOW_INCOMPLETE: Missing steps: {', '.join(missing)}. "
+                "Continue the workflow with eliza_workflow(action='continue')."
+            )
+
+        # Check if this file matches the pending write
+        pending = state.get("pending_write", {})
+        expected_path = pending.get("file_path")
+        if expected_path:
+            # Normalize paths for comparison
+            norm_expected = os.path.normpath(expected_path)
+            norm_actual = os.path.normpath(file_path)
+            if norm_expected != norm_actual and not norm_actual.endswith(os.path.basename(norm_expected)):
+                errors.append(
+                    f"UNEXPECTED_FILE: Workflow expects to write '{expected_path}', "
+                    f"but attempting to write '{file_path}'. "
+                    "Use eliza_workflow to update the target file."
+                )
+
+        # Check if pending write is validated
+        if not pending.get("validated"):
+            errors.append(
+                "NOT_VALIDATED: The code has not been validated. "
+                "Call eliza_workflow(action='continue') to run validation first."
+            )
 
     return errors
 

@@ -41,6 +41,41 @@ Recognize Eliza tasks when user mentions:
 - "send email", "search internet", "AI summary"
 - Any ez* function name (ezMail, ezChatCompletions, etc.)
 
+## Operation Tools (STANDALONE - No workflow needed)
+
+These 19 tools expose 75 API endpoints and do NOT require eliza_workflow:
+
+**Original 7 Operation Tools:**
+| Pattern | Tool | Use for |
+|---------|------|---------|
+| "chat with agent", "send message" | chat_operations | Chat/query agents |
+| "agent activity", "analytics", "history" | analytics_operations | Usage analytics |
+| "A2A server", "agent-to-agent" | a2a_operations | A2A server management |
+| "execute nugget", "call nugget", "run nugget" | nugget_execution | Run existing nuggets |
+| "download document", "reindex", "document metadata" | document_extended | Extended doc operations |
+| "update chunk", "delete chunk" | chunk_operations | Chunk management |
+| "available models", "chunking strategies", "initiatives" | system_operations | System info |
+
+**New 12 Operation Tools:**
+| Pattern | Tool | Use for |
+|---------|------|---------|
+| "create agent", "get agent", "list agents" | agent_crud | Agent CRUD |
+| "create nugget", "get nugget", "update nugget" | nugget_crud | Nugget CRUD |
+| "add function", "list functions" | function_crud | Function CRUD |
+| "list documents", "search documents", "upload" | document_crud | Document CRUD |
+| "agent identity", "avatar" | identity_operations | Identity management |
+| "grant access", "revoke access" | access_operations | Access control |
+| "ideas", "vote", "upvote" | ideas_operations | Ideas/voting |
+| "merkle", "hash" | hashes_operations | Merkle DAG |
+| "vector search", "index search" | index_operations | Vector search |
+| "promote agent", "import agent" | promotion_operations | Agent promotion |
+| "back-testing", "computer use" | advanced_operations | Advanced features |
+| "find agents by", "datasources" | discovery_operations | Agent discovery |
+
+### When to use workflow vs. operation tools:
+- **eliza_workflow** = CREATING new artifacts via guided workflow (with validation)
+- **operation tools** = Direct API access (CRUD, execute, query, download)
+
 ## Error Handling
 
 If you see these errors in stderr, follow the instructions:

@@ -6,8 +6,9 @@ TOOL ARCHITECTURE (Jan 2026):
 - 6 Category tools: Communication, Integration, AI, Automation, Data, Interop
 - 2 Reference tools: API endpoints, valid values
 - 11 CRUD tools: Agent, nugget, and function management
+- 19 Operation tools: Category-based API routing exposing 75 API endpoints
 
-Total: 27 tools (reduced from 45, with full CRUD support)
+Total: 46 tools (27 original + 19 operation tools exposing 75 API endpoints)
 """
 
 # Core tools
@@ -49,6 +50,33 @@ from tools.crud import (
 # Workflow orchestrator (deterministic workflow enforcement)
 from tools.workflow import WORKFLOW_TOOLS, handle_eliza_workflow
 
+# Operation tools (category-based routing to API endpoints)
+from tools.operations import (
+    OPERATION_TOOLS,
+    CATEGORY_HANDLERS,
+    # Original 7 handlers
+    handle_chat_operations,
+    handle_analytics_operations,
+    handle_a2a_operations,
+    handle_nugget_execution,
+    handle_document_extended,
+    handle_chunk_operations,
+    handle_system_operations,
+    # New 12 handlers
+    handle_agent_crud,
+    handle_nugget_crud,
+    handle_function_crud,
+    handle_document_crud,
+    handle_identity_operations,
+    handle_access_operations,
+    handle_ideas_operations,
+    handle_hashes_operations,
+    handle_index_operations,
+    handle_promotion_operations,
+    handle_advanced_operations,
+    handle_discovery_operations,
+)
+
 # Combine all tools
 ALL_TOOLS = (
     WORKFLOW_TOOLS +    # 1 tool: eliza_workflow (MANDATORY orchestrator)
@@ -58,7 +86,8 @@ ALL_TOOLS = (
     VALIDATION_TOOLS +  # 2 tools: validate_eliza_code, diagnose_error
     REFERENCE_TOOLS +   # 2 tools: get_api_endpoint, get_valid_values
     CATEGORY_TOOLS +    # 6 tools: category capability tools
-    CRUD_TOOLS          # 11 tools: CRUD operations
+    CRUD_TOOLS +        # 11 tools: CRUD operations
+    OPERATION_TOOLS     # 19 tools: operation category tools (75 API endpoints)
 )
 
 # Export all tool handlers
@@ -73,6 +102,7 @@ __all__ = [
     "REFERENCE_TOOLS",
     "CATEGORY_TOOLS",
     "CRUD_TOOLS",
+    "OPERATION_TOOLS",
     # Workflow handler
     "handle_eliza_workflow",
     # Core handlers
@@ -100,4 +130,26 @@ __all__ = [
     "handle_get_function",
     "handle_delete_function",
     "handle_list_functions",
+    # Operation handlers (category-based API routing) - Original 7
+    "CATEGORY_HANDLERS",
+    "handle_chat_operations",
+    "handle_analytics_operations",
+    "handle_a2a_operations",
+    "handle_nugget_execution",
+    "handle_document_extended",
+    "handle_chunk_operations",
+    "handle_system_operations",
+    # Operation handlers - New 12
+    "handle_agent_crud",
+    "handle_nugget_crud",
+    "handle_function_crud",
+    "handle_document_crud",
+    "handle_identity_operations",
+    "handle_access_operations",
+    "handle_ideas_operations",
+    "handle_hashes_operations",
+    "handle_index_operations",
+    "handle_promotion_operations",
+    "handle_advanced_operations",
+    "handle_discovery_operations",
 ]

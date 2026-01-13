@@ -39,14 +39,31 @@ from tools.workflow_state import (
     mark_env_file_written,
     is_step_completed,
     get_missing_steps,
+    get_current_step,  # V2.0 compatible
     can_retry,
     reset_state,
     save_state,
-    MANDATORY_STEPS
+    MANDATORY_STEPS,
+    # V2.0 multi-artifact functions
+    create_empty_state_v2,
+    add_artifact,
+    get_artifact,
+    get_artifact_by_path,
+    get_active_artifact,
+    set_active_artifact,
+    list_artifacts,
+    update_artifact_step,
+    update_artifact_intent,
+    update_artifact_code,
+    update_artifact_pending_write,
+    update_artifact_retry,
+    can_artifact_retry,
+    migrate_v1_to_v2,
 )
 from search.search import smart_search, get_function_signatures
 from search.index import EZ_FUNCTION_INDEX
 from validation.static import validate_code
+from tools.discovery import discover_artifacts, sync_discovered_to_state, get_discovery_summary
 
 
 # =============================================================================
@@ -62,14 +79,23 @@ Cascade MUST use this tool for ANY Eliza-related task - no bypassing allowed.
 
 The tool guides you through each step and tells you exactly what to do next.
 
+V2.0 FEATURES:
+- Multi-artifact support: Work on multiple nuggets/agents without losing state
+- Auto-discovery: Find existing Eliza files in your workspace
+- Shared credentials: Validate once, reuse for all artifacts
+
 Actions:
-- start: Begin a new workflow with a user requirement
-- continue: Continue an existing workflow
+- start: Begin a new workflow for a NEW artifact (reuses credentials if already validated)
+- continue: Continue workflow for active artifact
 - retry: Retry after a validation failure
-- reset: Reset and start fresh
+- reset: Reset workflow state completely
 - status: Get current workflow status
+- discover: Scan workspace for existing Eliza artifacts (nuggets, agents, functions)
+- switch: Switch to a different artifact by artifact_id
+- list: List all tracked artifacts with their status
 
 Example:
+    Call with action="discover" to find existing files
     Call with action="start" and requirement="Create a newsletter agent"
     Follow the returned instructions for each step.""",
     "inputSchema": {
@@ -77,7 +103,7 @@ Example:
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "continue", "retry", "reset", "status"],
+                "enum": ["start", "continue", "retry", "reset", "status", "discover", "switch", "list"],
                 "description": "Workflow action to perform"
             },
             "requirement": {
@@ -87,6 +113,10 @@ Example:
             "workspace_path": {
                 "type": "string",
                 "description": "Path to workspace directory (defaults to current directory)"
+            },
+            "artifact_id": {
+                "type": "string",
+                "description": "Target artifact ID (for 'switch' or 'continue' on specific artifact)"
             },
             "jwt_token": {
                 "type": "string",
@@ -116,6 +146,10 @@ Example:
             "file_path": {
                 "type": "string",
                 "description": "File path for the artifact"
+            },
+            "include_tests": {
+                "type": "boolean",
+                "description": "Include test files in discovery (default: false)"
             }
         },
         "required": ["action"]
@@ -191,18 +225,34 @@ async def handle_eliza_workflow(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     This implements the deterministic state machine that enforces
     the Eliza development workflow.
+
+    V2.0: Supports multi-artifact workflows with discover, switch, list actions.
     """
     action = arguments.get("action", "status")
     workspace_path = arguments.get("workspace_path", os.getcwd())
 
-    # Get or create workflow state
+    # Get or create workflow state (auto-migrates v1 to v2 if needed)
     state = get_or_create_state(workspace_path)
+
+    # Ensure v2.0 state
+    if state.get("version") != "2.0":
+        state = migrate_v1_to_v2(workspace_path)
 
     if action == "reset":
         return handle_reset(workspace_path)
 
     if action == "status":
         return handle_status(state)
+
+    # V2.0 actions
+    if action == "discover":
+        return await handle_discover(arguments, workspace_path, state)
+
+    if action == "switch":
+        return await handle_switch(arguments, workspace_path, state)
+
+    if action == "list":
+        return handle_list(state)
 
     if action == "start":
         return await handle_start(arguments, workspace_path, state)
@@ -215,7 +265,7 @@ async def handle_eliza_workflow(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "status": "ERROR",
-        "message": f"Unknown action: {action}. Use: start, continue, retry, reset, status"
+        "message": f"Unknown action: {action}. Use: start, continue, retry, reset, status, discover, switch, list"
     }
 
 
@@ -231,26 +281,224 @@ def handle_reset(workspace_path: str) -> Dict[str, Any]:
 
 def handle_status(state: Dict[str, Any]) -> Dict[str, Any]:
     """Get current workflow status."""
-    missing = get_missing_steps(state)
+    # V2.0 status includes multi-artifact info
+    if state.get("version") == "2.0":
+        active_artifact = get_active_artifact(state)
+        artifacts = list_artifacts(state)
+
+        active_info = None
+        if active_artifact:
+            active_info = {
+                "artifact_id": active_artifact["artifact_id"],
+                "label": active_artifact["label"],
+                "type": active_artifact["type"],
+                "workflow_step": active_artifact["workflow_step"],
+                "status": active_artifact["status"],
+                "retry_attempt": active_artifact["retry_state"]["attempt"]
+            }
+
+        return {
+            "status": "STATUS",
+            "version": "2.0",
+            "total_artifacts": len(artifacts),
+            "active_artifact": active_info,
+            "artifacts_summary": [
+                {
+                    "artifact_id": a["artifact_id"],
+                    "label": a["label"],
+                    "type": a["type"],
+                    "status": a["status"]
+                }
+                for a in artifacts
+            ],
+            "credentials": {
+                "jwt_provided": state["credentials"]["jwt_provided"],
+                "agent_id": state["credentials"]["agent_id"],
+                "env_file_written": state["credentials"]["env_file_written"]
+            },
+            "discovery_completed": state["discovery"]["completed"],
+            "message": f"V2.0: {len(artifacts)} artifacts tracked. Active: {active_artifact['label'] if active_artifact else 'None'}"
+        }
+    else:
+        # V1.0 fallback
+        missing = get_missing_steps(state)
+        return {
+            "status": "STATUS",
+            "version": "1.0",
+            "current_step": state["current_step"],
+            "steps_completed": [s["step"] for s in state["steps_completed"] if s["status"] == "passed"],
+            "missing_steps": missing,
+            "credentials": {
+                "jwt_provided": state["credentials"]["jwt_provided"],
+                "agent_id": state["credentials"]["agent_id"],
+                "env_file_written": state["credentials"]["env_file_written"]
+            },
+            "intent": state["intent"],
+            "retry_state": state["retry_state"],
+            "message": f"Current step: {state['current_step']}. Missing: {missing or 'None'}"
+        }
+
+
+# =============================================================================
+# V2.0 ACTION HANDLERS
+# =============================================================================
+
+async def handle_discover(arguments: Dict[str, Any], workspace_path: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Discover existing Eliza artifacts in workspace.
+
+    Scans for nugget, agent, and function files and registers them
+    in the workflow state for tracking.
+    """
+    include_tests = arguments.get("include_tests", False)
+
+    # Discover artifacts
+    discovered = discover_artifacts(workspace_path, include_tests=include_tests)
+
+    # Sync to state
+    added_ids, skipped_paths = sync_discovered_to_state(workspace_path, discovered, state)
+
+    # Update discovery state
+    state = get_or_create_state(workspace_path)
+    state["discovery"]["completed"] = True
+    state["discovery"]["completed_at"] = __import__("datetime").datetime.utcnow().isoformat()
+    state["discovery"]["discovered_files"] = [d["relative_path"] for d in discovered]
+    save_state(workspace_path, state)
+
+    # Get summary
+    summary = get_discovery_summary(workspace_path, discovered)
 
     return {
-        "status": "STATUS",
-        "current_step": state["current_step"],
-        "steps_completed": [s["step"] for s in state["steps_completed"] if s["status"] == "passed"],
-        "missing_steps": missing,
-        "credentials": {
-            "jwt_provided": state["credentials"]["jwt_provided"],
-            "agent_id": state["credentials"]["agent_id"],
-            "env_file_written": state["credentials"]["env_file_written"]
+        "status": "DISCOVERY_COMPLETE",
+        "total_found": len(discovered),
+        "discovered_count": len(added_ids),  # Alias for backwards compatibility
+        "newly_added": len(added_ids),
+        "already_tracked": len(skipped_paths),
+        "by_type": summary.get("by_type", {}),
+        "artifacts": [
+            {
+                "label": d["label"],
+                "type": d["type"],
+                "path": d["relative_path"]
+            }
+            for d in discovered
+        ],
+        "message": f"Found {len(discovered)} artifacts. Added {len(added_ids)} new, {len(skipped_paths)} already tracked.",
+        "next_action": "Call action='list' to see all artifacts, or action='switch' with artifact_id to work on one"
+    }
+
+
+async def handle_switch(arguments: Dict[str, Any], workspace_path: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Switch active artifact context.
+
+    Allows working on a different artifact without losing progress on others.
+    """
+    artifact_id = arguments.get("artifact_id")
+
+    if not artifact_id:
+        # List available artifacts for selection
+        artifacts = list_artifacts(state)
+        if not artifacts:
+            return {
+                "status": "NO_ARTIFACTS",
+                "message": "No artifacts tracked. Run action='discover' or action='start' first.",
+                "next_action": "Call action='discover' to find existing files, or action='start' to create new"
+            }
+
+        return {
+            "status": "SELECT_ARTIFACT",
+            "message": "Specify artifact_id to switch to",
+            "available_artifacts": [
+                {
+                    "artifact_id": a["artifact_id"],
+                    "label": a["label"],
+                    "type": a["type"],
+                    "status": a["status"],
+                    "workflow_step": a["workflow_step"]
+                }
+                for a in artifacts
+            ],
+            "next_action": "Call eliza_workflow(action='switch', artifact_id='<id>')"
+        }
+
+    # Validate artifact exists
+    artifact = get_artifact(state, artifact_id)
+    if not artifact:
+        return {
+            "status": "ERROR",
+            "message": f"Artifact {artifact_id} not found",
+            "next_action": "Call action='list' to see available artifacts"
+        }
+
+    # Switch active artifact
+    set_active_artifact(workspace_path, artifact_id)
+
+    return {
+        "status": "SWITCHED",
+        "active_artifact": {
+            "artifact_id": artifact_id,
+            "label": artifact["label"],
+            "type": artifact["type"],
+            "workflow_step": artifact["workflow_step"],
+            "status": artifact["status"]
         },
-        "intent": state["intent"],
-        "retry_state": state["retry_state"],
-        "message": f"Current step: {state['current_step']}. Missing: {missing or 'None'}"
+        "message": f"Now working on: {artifact['label']}",
+        "next_action": f"Call action='continue' to proceed with {artifact['label']}"
+    }
+
+
+def handle_list(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    List all tracked artifacts with their status.
+    """
+    artifacts = list_artifacts(state)
+    active_id = state.get("active_artifact_id")
+
+    artifact_summaries = []
+    by_status = {}
+
+    for a in artifacts:
+        summary = {
+            "artifact_id": a["artifact_id"],
+            "label": a["label"],
+            "type": a["type"],
+            "file_path": a.get("file_path"),
+            "status": a["status"],
+            "workflow_step": a["workflow_step"],
+            "discovered": a.get("discovered", False),
+            "is_active": a["artifact_id"] == active_id,
+            "retry_count": a["retry_state"]["attempt"]
+        }
+        artifact_summaries.append(summary)
+
+        # Group by status
+        status = a["status"]
+        if status not in by_status:
+            by_status[status] = []
+        by_status[status].append(summary)
+
+    return {
+        "status": "LIST",
+        "total_artifacts": len(artifacts),
+        "active_artifact_id": active_id,
+        "artifacts": artifact_summaries,
+        "by_status": {k: len(v) for k, v in by_status.items()},
+        "credentials_valid": state["credentials"]["jwt_provided"],
+        "discovery_completed": state["discovery"]["completed"],
+        "message": f"{len(artifacts)} artifacts: {', '.join(f'{k}={len(v)}' for k, v in by_status.items()) or 'none'}"
     }
 
 
 async def handle_start(arguments: Dict[str, Any], workspace_path: str, state: Dict[str, Any]) -> Dict[str, Any]:
-    """Start a new workflow."""
+    """
+    Start a new workflow for a NEW artifact.
+
+    V2.0 CHANGE: Does NOT reset entire state anymore.
+    - Creates a new artifact entry in the artifacts array
+    - Reuses existing credentials if already validated
+    - Each artifact has independent workflow state
+    """
     requirement = arguments.get("requirement", "")
 
     if not requirement:
@@ -260,19 +508,71 @@ async def handle_start(arguments: Dict[str, Any], workspace_path: str, state: Di
             "next_action": "Call eliza_workflow with action='start' and requirement='your description'"
         }
 
-    # Reset state for new workflow
-    state = reset_state(workspace_path)
+    # Ensure v2.0 state (don't reset - that was the old behavior)
+    if state.get("version") != "2.0":
+        state = migrate_v1_to_v2(workspace_path)
 
-    # Store the requirement
-    update_intent(workspace_path, user_requirement=requirement)
+    # Detect artifact type from requirement
+    artifact_type = detect_artifact_type_from_requirement(requirement)
 
-    # Move to credential check
-    return await handle_continue(arguments, workspace_path, state)
+    # Generate a label from the requirement
+    label = generate_label_from_requirement(requirement)
+
+    # Create new artifact (does NOT reset other artifacts or credentials)
+    state, artifact_id = add_artifact(
+        workspace_path,
+        artifact_type=artifact_type,
+        label=label,
+        discovered=False
+    )
+
+    # Set as active artifact
+    set_active_artifact(workspace_path, artifact_id)
+
+    # Store requirement in artifact's intent
+    update_artifact_intent(workspace_path, artifact_id, user_requirement=requirement)
+
+    # Check if credentials already exist and are valid
+    if state["credentials"]["jwt_provided"] and state["credentials"]["env_file_written"]:
+        # Skip credential collection, go directly to intent detection
+        return {
+            "status": "CREDENTIALS_REUSED",
+            "current_step": WorkflowStep.DETECT_INTENT.value,
+            "artifact_id": artifact_id,
+            "artifact_label": label,
+            "artifact_type": artifact_type,
+            "message": f"Created new artifact '{label}'. Reusing existing credentials.",
+            "next_action": "Call action='continue' to proceed with intent detection and function search"
+        }
+    else:
+        # Need credentials - same as before
+        return await step_check_credentials(arguments, workspace_path, get_or_create_state(workspace_path))
+
+
+def detect_artifact_type_from_requirement(requirement: str) -> str:
+    """Detect artifact type from user requirement text."""
+    req_lower = requirement.lower()
+
+    if any(word in req_lower for word in ["agent", "rag", "chat", "assistant", "bot"]):
+        return "agent"
+    if any(word in req_lower for word in ["function", "sdk", "python"]):
+        return "function"
+    # Default to nugget (most common)
+    return "nugget"
+
+
+def generate_label_from_requirement(requirement: str) -> str:
+    """Generate a short label from the requirement text."""
+    # Take first 50 chars, remove special chars, title case
+    label = requirement[:50].strip()
+    label = re.sub(r'[^a-zA-Z0-9\s]', '', label)
+    label = ' '.join(label.split())  # Normalize whitespace
+    return label.title() if label else "New Artifact"
 
 
 async def handle_continue(arguments: Dict[str, Any], workspace_path: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Continue workflow from current step."""
-    current_step = state["current_step"]
+    current_step = get_current_step(state)
 
     # Determine next step based on current state
     if current_step == WorkflowStep.INIT.value:
@@ -304,7 +604,8 @@ async def handle_continue(arguments: Dict[str, Any], workspace_path: str, state:
         return await step_static_validation(arguments, workspace_path, state)
 
     if current_step == WorkflowStep.STATIC_VALIDATION.value:
-        if state["artifact"]["validated"]:
+        artifact_data = get_artifact_data(state)
+        if artifact_data.get("validated"):
             return await step_ready_to_write(arguments, workspace_path, state)
         return await step_static_validation(arguments, workspace_path, state)
 
@@ -427,9 +728,58 @@ ELIZA_ENV={creds['env']}
     return await step_detect_intent(arguments, workspace_path, get_or_create_state(workspace_path))
 
 
+def get_intent_data(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Get intent data, handling both v1.0 and v2.0 state."""
+    if state.get("version") == "2.0":
+        active_id = state.get("active_artifact_id")
+        if active_id:
+            artifact = get_artifact(state, active_id)
+            if artifact:
+                return artifact.get("intent", {})
+        return {}
+    return state.get("intent", {})
+
+
+def get_artifact_data(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Get artifact data, handling both v1.0 and v2.0 state."""
+    if state.get("version") == "2.0":
+        active_id = state.get("active_artifact_id")
+        if active_id:
+            artifact = get_artifact(state, active_id)
+            if artifact:
+                return artifact.get("artifact_data", {})
+        return {}
+    return state.get("artifact", {})
+
+
+def get_pending_write_data(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Get pending write data, handling both v1.0 and v2.0 state."""
+    if state.get("version") == "2.0":
+        active_id = state.get("active_artifact_id")
+        if active_id:
+            artifact = get_artifact(state, active_id)
+            if artifact:
+                return artifact.get("pending_write", {})
+        return {}
+    return state.get("pending_write", {})
+
+
+def get_retry_state_data(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Get retry state data, handling both v1.0 and v2.0 state."""
+    if state.get("version") == "2.0":
+        active_id = state.get("active_artifact_id")
+        if active_id:
+            artifact = get_artifact(state, active_id)
+            if artifact:
+                return artifact.get("retry_state", {})
+        return {}
+    return state.get("retry_state", {})
+
+
 async def step_detect_intent(arguments: Dict[str, Any], workspace_path: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Step 3: Detect user intent from requirement."""
-    requirement = state["intent"]["user_requirement"] or arguments.get("requirement", "")
+    intent_data = get_intent_data(state)
+    requirement = intent_data.get("user_requirement") or arguments.get("requirement", "")
 
     if not requirement:
         return {
@@ -461,7 +811,7 @@ async def step_detect_intent(arguments: Dict[str, Any], workspace_path: str, sta
 
 async def step_search_functions(arguments: Dict[str, Any], workspace_path: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Step 4: Search and present ez* functions."""
-    intent_data = state["intent"]
+    intent_data = get_intent_data(state)
 
     required_funcs = intent_data.get("required_functions", [])
     optional_funcs = intent_data.get("optional_functions", [])
@@ -552,7 +902,7 @@ async def step_create_artifact(arguments: Dict[str, Any], workspace_path: str, s
 
 async def step_static_validation(arguments: Dict[str, Any], workspace_path: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Step 6: Run static validation on generated code."""
-    artifact = state["artifact"]
+    artifact = get_artifact_data(state)
     code = artifact.get("code") or arguments.get("generated_code")
 
     if not code:
@@ -596,6 +946,7 @@ async def step_static_validation(arguments: Dict[str, Any], workspace_path: str,
         })
 
         state = get_or_create_state(workspace_path)
+        retry_state = get_retry_state_data(state)
         if can_retry(state):
             return {
                 "status": WorkflowStatus.VALIDATION_FAILED.value,
@@ -603,8 +954,8 @@ async def step_static_validation(arguments: Dict[str, Any], workspace_path: str,
                 "errors": errors,
                 "fix_suggestion": fix_suggestion,
                 "fixed_code": validation_result.fixed_code,
-                "retry_attempt": state["retry_state"]["attempt"],
-                "max_attempts": state["retry_state"]["max_attempts"],
+                "retry_attempt": retry_state.get("attempt", 0),
+                "max_attempts": retry_state.get("max_attempts", 3),
                 "next_action": f"""VALIDATION FAILED. Fix the code:
 
 ERRORS:
@@ -621,15 +972,15 @@ Then call eliza_workflow with:
             return {
                 "status": WorkflowStatus.FAILED.value,
                 "message": "Maximum retry attempts exceeded",
-                "errors": state["retry_state"]["errors"],
+                "errors": retry_state.get("errors", []),
                 "next_action": "Call eliza_workflow with action='reset' to start over"
             }
 
 
 async def step_ready_to_write(arguments: Dict[str, Any], workspace_path: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Step 7: File is ready to be written."""
-    pending = state["pending_write"]
-    artifact = state["artifact"]
+    pending = get_pending_write_data(state)
+    artifact = get_artifact_data(state)
 
     file_path = pending.get("file_path") or artifact.get("file_path")
     content = pending.get("content") or artifact.get("code")
@@ -669,7 +1020,7 @@ async def step_complete(arguments: Dict[str, Any], workspace_path: str, state: D
         "status": WorkflowStatus.COMPLETE.value,
         "current_step": WorkflowStep.COMPLETE.value,
         "message": "Workflow completed successfully!",
-        "artifact": state["artifact"],
+        "artifact": get_artifact_data(state),
         "next_action": "No further action needed. The nugget/agent is ready to use."
     }
 
@@ -680,7 +1031,8 @@ async def handle_retry(arguments: Dict[str, Any], workspace_path: str, state: Di
 
     if not generated_code:
         # Return current error info
-        errors = state["retry_state"].get("errors", [])
+        retry_state = get_retry_state_data(state)
+        errors = retry_state.get("errors", [])
         latest_error = errors[-1] if errors else {"error": "Unknown error"}
 
         return {
@@ -688,8 +1040,8 @@ async def handle_retry(arguments: Dict[str, Any], workspace_path: str, state: Di
             "current_step": WorkflowStep.RETRY_LOOP.value,
             "error": latest_error.get("error"),
             "fix_suggestion": latest_error.get("fix_suggestion"),
-            "retry_attempt": state["retry_state"]["attempt"],
-            "max_attempts": state["retry_state"]["max_attempts"],
+            "retry_attempt": retry_state.get("attempt", 0),
+            "max_attempts": retry_state.get("max_attempts", 3),
             "next_action": "Fix the code based on the error, then call eliza_workflow with action='retry' and generated_code='<fixed code>'"
         }
 
