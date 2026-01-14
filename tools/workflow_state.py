@@ -742,6 +742,335 @@ def mark_env_file_written(workspace_path: str) -> Dict[str, Any]:
 
 
 # =============================================================================
+# WORKSPACE RESOLUTION AND LAZY CREDENTIAL INITIALIZATION
+# =============================================================================
+
+def resolve_workspace_path(arguments: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Resolve workspace path - NO AUTO-DISCOVERY from parent directories.
+
+    Each workspace is unique and isolated. This function does NOT search
+    parent directories to find .eliza/ folders.
+
+    Resolution order:
+    1. If workspace_path is explicitly provided in arguments, use it
+    2. Check if CWD has .eliza/workflow_state.json (NOT parents!)
+    3. If not found, return error asking user to provide workspace_path
+
+    Args:
+        arguments: Tool arguments dict, may contain 'workspace_path' key
+
+    Returns:
+        Tuple of (workspace_path, error_message)
+        - If workspace found: (path, None)
+        - If not found: (None, error_message)
+    """
+    # 1. Explicit argument takes priority
+    if arguments.get("workspace_path"):
+        path = arguments["workspace_path"]
+        if os.path.isdir(path):
+            return path, None
+        return None, f"Workspace path not found: {path}. Please provide a valid directory path."
+
+    # 2. Check ONLY the current working directory - NO PARENT TRAVERSAL
+    # Each workspace must be unique - no auto-discovery from parent directories
+    cwd = os.getcwd()
+    eliza_dir = os.path.join(cwd, ".eliza")
+    state_file = os.path.join(eliza_dir, "workflow_state.json")
+
+    if os.path.exists(state_file):
+        return cwd, None  # Found state in CWD only
+
+    # 3. Discovery failed - ask user
+    return None, (
+        "Could not auto-detect workspace. Please provide the workspace_path parameter.\n"
+        "Example: workspace_path='/path/to/your/project'"
+    )
+
+
+def _validate_jwt_format_basic(jwt: str) -> tuple[bool, str]:
+    """
+    Basic JWT format validation (local copy to avoid circular imports).
+
+    Checks:
+    - Token is not too short
+    - Token is not a placeholder
+    - Token has three dot-separated parts (JWT format)
+
+    Args:
+        jwt: The JWT token string
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if not jwt or len(jwt) < 10:
+        return False, "JWT token is too short"
+
+    # Check for placeholders
+    placeholders = ["{YOUR_JWT}", "jwt_token", "{JWT}", "YOUR_JWT_HERE", "<jwt>", "your_jwt"]
+    if any(p.lower() in jwt.lower() for p in placeholders):
+        return False, "JWT appears to be a placeholder. Please provide a real token."
+
+    # Basic JWT format check (three base64 parts separated by dots)
+    parts = jwt.split(".")
+    if len(parts) != 3:
+        return False, "JWT must have three parts separated by dots"
+
+    return True, ""
+
+
+def write_env_file(
+    workspace_path: str,
+    jwt_token: str,
+    agent_id: Optional[str] = None,
+    initiative_id: Optional[str] = None,
+    env: str = "QA"
+) -> bool:
+    """
+    Write .env file to workspace with credentials.
+
+    Creates or overwrites the .env file in the workspace root directory.
+    This file is used by hooks and API calls to authenticate.
+
+    Args:
+        workspace_path: Path to the workspace directory
+        jwt_token: JWT token for authentication
+        agent_id: Agent UUID (optional)
+        initiative_id: Initiative ID (optional)
+        env: Environment (DEV, QA, PROD), defaults to QA
+
+    Returns:
+        True if file was written successfully, False otherwise
+    """
+    env_path = os.path.join(workspace_path, ".env")
+    content = f"""# Eliza Credentials - Auto-generated
+# DO NOT COMMIT THIS FILE
+
+ELIZA_JWT_TOKEN={jwt_token}
+ELIZA_AGENT_ID={agent_id or ''}
+ELIZA_INITIATIVE_ID={initiative_id or ''}
+ELIZA_ENV={env}
+"""
+    try:
+        with open(env_path, 'w') as f:
+            f.write(content)
+        return True
+    except IOError:
+        return False
+
+
+def read_env_file(workspace_path: str) -> Dict[str, str]:
+    """
+    Read credentials from .env file in workspace.
+
+    This is the CENTRALIZED function for reading stored credentials.
+    All tools should use this (via ensure_credentials) instead of
+    manually parsing .env files.
+
+    Args:
+        workspace_path: Path to the workspace directory
+
+    Returns:
+        Dict with keys: jwt_token, agent_id, initiative_id, env
+        Missing values will be empty strings
+    """
+    env_path = os.path.join(workspace_path, ".env")
+    result = {
+        "jwt_token": "",
+        "agent_id": "",
+        "initiative_id": "",
+        "env": "QA"
+    }
+
+    if not os.path.exists(env_path):
+        return result
+
+    try:
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip()
+
+                    if key == "ELIZA_JWT_TOKEN":
+                        result["jwt_token"] = value
+                    elif key == "ELIZA_AGENT_ID":
+                        result["agent_id"] = value
+                    elif key == "ELIZA_INITIATIVE_ID":
+                        result["initiative_id"] = value
+                    elif key == "ELIZA_ENV":
+                        result["env"] = value or "QA"
+    except IOError:
+        pass
+
+    return result
+
+
+def ensure_credentials(
+    workspace_path: str,
+    jwt_token: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    initiative_id: Optional[str] = None,
+    env: str = "QA"
+) -> tuple[bool, Dict[str, Any], str]:
+    """
+    Ensure credentials exist for a workspace, creating minimal state if needed.
+
+    This is the CENTRALIZED credential management function. All tools should
+    use this to get credentials instead of manually reading .env files.
+
+    This function implements lazy credential initialization:
+    - If workflow state exists, read actual credentials from .env and return
+    - If no state exists but jwt_token is provided, create minimal state
+    - If no state exists and no jwt_token, return error
+
+    The minimal state created has workflow_step="CREDENTIALS_ONLY" which
+    is sufficient for READ/EXECUTE operations but not for CREATE operations.
+
+    Args:
+        workspace_path: Path to the workspace directory
+        jwt_token: JWT token (required if no existing state)
+        agent_id: Agent UUID (optional)
+        initiative_id: Initiative ID (optional)
+        env: Environment (DEV, QA, PROD), defaults to QA
+
+    Returns:
+        Tuple of (success, credentials_dict, error_message)
+        - success: True if credentials are available
+        - credentials_dict: Dict with ACTUAL values: jwt_token, agent_id, initiative_id, env
+        - error_message: Error string if success is False
+
+    Example:
+        success, creds, error = ensure_credentials(workspace_path, jwt_token="...")
+        if success:
+            jwt = creds["jwt_token"]  # The ACTUAL JWT token
+            agent_id = creds["agent_id"]
+    """
+    state = load_state(workspace_path)
+
+    if state is not None:
+        # State exists - read ACTUAL credentials from .env file
+        env_creds = read_env_file(workspace_path)
+
+        # Check if we have valid credentials stored
+        if env_creds.get("jwt_token"):
+            # Return actual credentials from .env file
+            return True, {
+                "jwt_token": env_creds["jwt_token"],
+                "agent_id": env_creds.get("agent_id") or agent_id or "",
+                "initiative_id": env_creds.get("initiative_id") or initiative_id or "",
+                "env": env_creds.get("env") or env,
+                "jwt_provided": True
+            }, ""
+
+        # State exists but no JWT in .env - need jwt_token to update
+        if not jwt_token:
+            return False, {}, (
+                "Workflow state exists but JWT token not found in .env file. "
+                "Please provide jwt_token parameter."
+            )
+
+    # No state or state needs credentials
+    if not jwt_token:
+        return False, {}, (
+            "No workflow state found. Please provide jwt_token parameter, "
+            "or run eliza_workflow(action='start') to initialize credentials."
+        )
+
+    # Validate JWT format
+    valid, error = _validate_jwt_format_basic(jwt_token)
+    if not valid:
+        return False, {}, f"Invalid JWT token: {error}"
+
+    # Create minimal state with CREDENTIALS_ONLY step
+    minimal_state = {
+        "version": "2.0",
+        "session_id": str(uuid.uuid4()),
+        "workspace_path": workspace_path,
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "workflow_step": "CREDENTIALS_ONLY",  # Special step for lazy init
+
+        # Shared credentials
+        "credentials": {
+            "jwt_provided": True,
+            "agent_id": agent_id,
+            "initiative_id": initiative_id,
+            "env": env,
+            "env_file_written": True,
+            "validated_at": datetime.utcnow().isoformat()
+        },
+
+        # Empty artifacts array (no CREATE workflow run)
+        "artifacts": [],
+        "active_artifact_id": None,
+
+        # Mark as created via lazy init
+        "created_via": "lazy_init",
+
+        # Discovery not done
+        "discovery": {
+            "completed": False,
+            "completed_at": None,
+            "discovered_files": [],
+            "patterns_used": []
+        }
+    }
+
+    # Save state
+    save_state(workspace_path, minimal_state)
+
+    # Write .env file
+    write_env_file(workspace_path, jwt_token, agent_id, initiative_id, env)
+
+    # Return ACTUAL credentials including the jwt_token
+    return True, {
+        "jwt_token": jwt_token,
+        "agent_id": agent_id or "",
+        "initiative_id": initiative_id or "",
+        "env": env,
+        "jwt_provided": True
+    }, ""
+
+
+def is_credentials_only_state(state: Dict[str, Any]) -> bool:
+    """
+    Check if state was created via lazy initialization (credentials only).
+
+    States created via ensure_credentials() have workflow_step="CREDENTIALS_ONLY"
+    or created_via="lazy_init". These states are sufficient for READ/EXECUTE
+    operations but not for CREATE operations which require full workflow.
+
+    Args:
+        state: The workflow state dict
+
+    Returns:
+        True if state is credentials-only (not full workflow)
+    """
+    if state is None:
+        return False
+
+    # Check for CREDENTIALS_ONLY step
+    if state.get("workflow_step") == "CREDENTIALS_ONLY":
+        return True
+
+    # Check for lazy_init marker
+    if state.get("created_via") == "lazy_init":
+        return True
+
+    # For v2.0, also check if no artifacts exist
+    if state.get("version") == "2.0":
+        if not state.get("artifacts") and state.get("credentials", {}).get("jwt_provided"):
+            return True
+
+    return False
+
+
+# =============================================================================
 # V2.0 MULTI-ARTIFACT STATE MANAGEMENT
 # =============================================================================
 

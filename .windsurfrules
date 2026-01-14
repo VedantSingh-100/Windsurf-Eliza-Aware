@@ -1,13 +1,50 @@
 # Eliza Development Rules for Cascade
 
-## MANDATORY WORKFLOW - DO NOT BYPASS
+## WORKSPACE PATH (Jan 2026)
 
-For ANY Eliza-related task (agents, nuggets, functions, capabilities), you MUST:
+**CRITICAL**: Eliza tools need to know which workspace to use for `.eliza/` state.
+
+**Resolution order:**
+1. If `workspace_path` provided in tool call → use it
+2. If `.eliza/workflow_state.json` found in discoverable location → use that workspace
+3. If neither → **ASK user for workspace_path**
+
+**Example:**
+```
+eliza_workflow(action='start', workspace_path='/path/to/your/repo', requirement='...')
+```
+
+**Note:** When user provides JWT token for the first time, it will be stored in `{workspace}/.env`.
+
+## THREE-TIER TOOL CLASSIFICATION (Jan 2026)
+
+### Tier 1: CREATE Tools (Full Workflow Required)
+- `eliza_workflow` (orchestrator)
+- `create_nugget`, `create_rag_agent`, `create_function_agent`
+- `create_*_capability` (6 tools)
+
+**These tools require full workflow state.** CREDENTIALS_ONLY state (from lazy init) is NOT sufficient.
+
+### Tier 2: READ/EXECUTE Tools (Lazy Initialization OK)
+- All operation tools (chat_operations, analytics_operations, etc.)
+- All CRUD tools (get_agent, list_nuggets, etc.)
+
+**These tools support lazy credential initialization.** If `jwt_token` provided without workflow state, credentials are persisted for reuse.
+
+### Tier 3: Reference Tools (No Credentials)
+- `search_ez_functions`, `get_api_endpoint`, `get_valid_values`, `validate_eliza_code`, `diagnose_error`
+
+**These tools work without any credentials or workspace.**
+
+## MANDATORY WORKFLOW FOR CREATE OPERATIONS
+
+For CREATING artifacts (nuggets, functions, capabilities), you MUST:
 
 1. **ALWAYS call `eliza_workflow` tool FIRST**
    - action='start' for new tasks
    - action='continue' to resume
    - action='retry' after validation failure
+   - **Include workspace_path parameter**
 
 2. **FOLLOW the response instructions EXACTLY**
    - Check the `status` field
@@ -79,6 +116,9 @@ These 19 tools expose 75 API endpoints and do NOT require eliza_workflow:
 ## Error Handling
 
 If you see these errors in stderr, follow the instructions:
+- `WORKSPACE_REQUIRED`: Provide workspace_path parameter in your tool call
+- `CREDENTIALS_REQUIRED`: Provide jwt_token parameter, or run eliza_workflow first
+- `CREDENTIALS_ONLY`: State was created via lazy init - run full eliza_workflow for CREATE operations
 - `WORKFLOW_REQUIRED`: Call eliza_workflow first
 - `WORKFLOW_INCOMPLETE`: Call eliza_workflow(action='continue')
 - `RUNTIME_VALIDATION_FAILED`: Call eliza_workflow(action='retry')
@@ -90,13 +130,30 @@ If you see these errors in stderr, follow the instructions:
 User: "Make me an agent that sends daily newsletters"
 
 Cascade:
-1. Call eliza_workflow(action='start', requirement='daily newsletter agent')
-2. Response: NEED_CREDENTIALS → Ask user for JWT token
-3. Call eliza_workflow(action='continue', jwt_token=..., agent_id=...)
+1. Call eliza_workflow(action='start', workspace_path='/path/to/project', requirement='daily newsletter agent')
+2. Response: WORKSPACE_REQUIRED (if no .eliza/ found) → Ask user for workspace_path
+   OR Response: NEED_CREDENTIALS → Ask user for JWT token
+3. Call eliza_workflow(action='continue', workspace_path='...', jwt_token=..., agent_id=...)
 4. Response: READY_TO_WRITE → Write the file
 5. Hook validates automatically
 6. If validation fails → Call eliza_workflow(action='retry')
 7. Response: COMPLETE → Done!
+```
+
+## Example: READ/EXECUTE without full workflow
+
+```
+User: "Chat with agent X"
+
+Cascade (if .eliza/ exists):
+1. Call chat_operations(operation='chat', agent_id='...', message='hello')
+2. Credentials read from .eliza/workflow_state.json and .env
+3. Response returned
+
+Cascade (if no .eliza/ and user provides jwt_token):
+1. Call chat_operations(operation='chat', workspace_path='...', jwt_token='...', agent_id='...', message='hello')
+2. Credentials are lazily initialized and persisted
+3. Response returned (future calls don't need jwt_token)
 ```
 
 ## Remember

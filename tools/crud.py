@@ -4,6 +4,9 @@ CRUD MCP Tools
 MCP tools for read, update, and delete operations on agents, nuggets, and functions.
 All tools perform validation before making API calls.
 
+TIER 2 TOOLS: These are READ/EXECUTE operations that support lazy credential initialization.
+They use resolve_workspace_path() and ensure_credentials() for smart credential handling.
+
 TOOLS:
 - Agent: get_agent, update_agent, delete_agent, list_agents
 - Nugget: get_nugget, update_nugget, delete_nugget, list_nuggets
@@ -11,7 +14,7 @@ TOOLS:
 """
 
 from mcp.types import Tool
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Optional
 import json
 
 from api.client import get_client
@@ -19,6 +22,10 @@ from validation import (
     validate_common_inputs,
     validate_agent_id,
     format_validation_errors,
+)
+from tools.workflow_state import (
+    resolve_workspace_path,
+    ensure_credentials,
 )
 
 
@@ -443,9 +450,12 @@ USE THIS WHEN: User wants to see available functions on an agent.""",
 # TOOL HANDLERS
 # =============================================================================
 
-def _validate_and_get_client(args: Dict[str, Any], require_agent: bool = True):
+def _validate_and_get_client(args: Dict[str, Any], require_agent: bool = True) -> Tuple[Optional[Any], Optional[str]]:
     """
-    Common validation and client creation.
+    Common validation and client creation with smart credential handling.
+
+    Uses resolve_workspace_path() and ensure_credentials() for lazy initialization.
+    If jwt_token is provided directly, it can work without workspace state.
 
     Returns:
         Tuple[ElizaClient, None] on success
@@ -454,6 +464,41 @@ def _validate_and_get_client(args: Dict[str, Any], require_agent: bool = True):
     jwt_token = args.get("jwt_token", "")
     agent_id = args.get("agent_id", "")
     env = args.get("env", "QA")
+
+    # Try to resolve workspace and use ensure_credentials for lazy init
+    resolved_workspace, ws_error = resolve_workspace_path(args)
+
+    # ENFORCE workspace path - must have .eliza/ tracking
+    if ws_error:
+        return None, json.dumps({
+            "status": "WORKSPACE_REQUIRED",
+            "error": ws_error,
+            "fix": "Provide workspace_path parameter pointing to your project directory. "
+                   "Example: workspace_path='/path/to/your/project'. "
+                   "Or run eliza_workflow(action='start') first to initialize credentials."
+        })
+
+    if resolved_workspace:
+        # Workspace found - use ensure_credentials for lazy init
+        success, creds, cred_error = ensure_credentials(
+            resolved_workspace,
+            jwt_token=jwt_token if jwt_token else None,
+            agent_id=agent_id if agent_id else None,
+            env=env
+        )
+
+        if success:
+            # Use credentials returned by ensure_credentials (centralized reading)
+            jwt_token = creds.get("jwt_token") or jwt_token
+            agent_id = agent_id or creds.get("agent_id", "")
+            env = creds.get("env", env)
+        else:
+            # ensure_credentials failed - return specific error instead of generic validation
+            return None, json.dumps({
+                "status": "CREDENTIALS_REQUIRED",
+                "error": cred_error,
+                "fix": "Provide jwt_token parameter, or run eliza_workflow(action='start') first to initialize credentials."
+            })
 
     # Validate inputs
     if require_agent:
@@ -470,7 +515,11 @@ def _validate_and_get_client(args: Dict[str, Any], require_agent: bool = True):
         })()
 
     if not validation.valid:
-        return None, format_validation_errors(validation)
+        # Add helpful message about workspace/credentials
+        error_msg = format_validation_errors(validation)
+        if not jwt_token:
+            error_msg += "\n\nTIP: Provide jwt_token directly, or run eliza_workflow(action='start') to initialize credentials."
+        return None, error_msg
 
     # Create client
     client = get_client(jwt_token, env)

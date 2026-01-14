@@ -4,6 +4,9 @@ Agent Tools
 MCP tools for creating Eliza agents (RAG, Function-calling).
 Returns .env file content for Cascade to write (triggers validation hooks).
 
+TIER 1 CREATE TOOLS: These tools create agents via API.
+They support credential lookup from workflow state but can also work with direct jwt_token.
+
 VALIDATION: All inputs are validated before API calls.
 """
 
@@ -12,6 +15,7 @@ from mcp.types import Tool
 from typing import Dict, Any
 from api.client import ElizaClient, COGENGINE_URLS
 from validation import validate_create_agent_inputs, format_validation_errors
+from tools.workflow_state import resolve_workspace_path, load_state, is_credentials_only_state, ensure_credentials
 
 
 def generate_env_content_for_agent(agent_id: str, env: str = "QA") -> str:
@@ -149,6 +153,41 @@ def create_rag_agent(args: Dict[str, Any]) -> str:
     agent_desc = args.get("agent_description", "Answers questions from uploaded documents")
     system_prompt = args.get("system_prompt", "You are a helpful assistant that answers questions based on the provided documents.")
 
+    # Try to resolve workspace and ensure credentials are tracked
+    resolved_workspace, ws_error = resolve_workspace_path(args)
+
+    # ENFORCE workspace path - must have .eliza/ tracking
+    if ws_error:
+        return json.dumps({
+            "status": "WORKSPACE_REQUIRED",
+            "error": ws_error,
+            "fix": "Provide workspace_path parameter pointing to your project directory. "
+                   "Example: workspace_path='/path/to/your/project'. "
+                   "Or run eliza_workflow(action='start') first to initialize credentials."
+        })
+
+    if resolved_workspace:
+        # Use ensure_credentials to create/verify state and get ACTUAL credentials
+        success, creds, cred_error = ensure_credentials(
+            resolved_workspace,
+            jwt_token=jwt_token or None,
+            agent_id=None,  # Agent creation doesn't have agent_id yet
+            initiative_id=initiative_id or None,
+            env=env
+        )
+        if success:
+            # Use credentials returned by ensure_credentials (centralized reading)
+            jwt_token = creds.get("jwt_token") or jwt_token
+            initiative_id = creds.get("initiative_id") or initiative_id
+            env = creds.get("env") or env
+        else:
+            # ensure_credentials failed - return specific error
+            return json.dumps({
+                "status": "CREDENTIALS_REQUIRED",
+                "error": cred_error,
+                "fix": "Provide jwt_token and initiative_id parameters, or run eliza_workflow(action='start') first."
+            })
+
     # VALIDATION FIRST - Block on any validation error
     validation = validate_create_agent_inputs(jwt_token, initiative_id, env)
     if not validation.valid:
@@ -262,6 +301,41 @@ def create_function_agent(args: Dict[str, Any]) -> str:
     agent_name = args.get("agent_name", "Function Agent")
     agent_desc = args.get("agent_description", "An agent that can use tools and functions")
     system_prompt = args.get("system_prompt", "You are a helpful assistant with access to various tools.")
+
+    # Try to resolve workspace and ensure credentials are tracked
+    resolved_workspace, ws_error = resolve_workspace_path(args)
+
+    # ENFORCE workspace path - must have .eliza/ tracking
+    if ws_error:
+        return json.dumps({
+            "status": "WORKSPACE_REQUIRED",
+            "error": ws_error,
+            "fix": "Provide workspace_path parameter pointing to your project directory. "
+                   "Example: workspace_path='/path/to/your/project'. "
+                   "Or run eliza_workflow(action='start') first to initialize credentials."
+        })
+
+    if resolved_workspace:
+        # Use ensure_credentials to create/verify state and get ACTUAL credentials
+        success, creds, cred_error = ensure_credentials(
+            resolved_workspace,
+            jwt_token=jwt_token or None,
+            agent_id=None,  # Agent creation doesn't have agent_id yet
+            initiative_id=initiative_id or None,
+            env=env
+        )
+        if success:
+            # Use credentials returned by ensure_credentials (centralized reading)
+            jwt_token = creds.get("jwt_token") or jwt_token
+            initiative_id = creds.get("initiative_id") or initiative_id
+            env = creds.get("env") or env
+        else:
+            # ensure_credentials failed - return specific error
+            return json.dumps({
+                "status": "CREDENTIALS_REQUIRED",
+                "error": cred_error,
+                "fix": "Provide jwt_token and initiative_id parameters, or run eliza_workflow(action='start') first."
+            })
 
     # VALIDATION FIRST - Block on any validation error
     validation = validate_create_agent_inputs(jwt_token, initiative_id, env)

@@ -7,11 +7,16 @@ Each category tool uses a sub_type parameter to specify the exact capability.
 BEFORE: 28 individual tools (create_email_function, create_database_function, etc.)
 AFTER: 6 category tools with sub_type parameter
 
+TIER 1 CREATE TOOLS: These tools guide creation of capabilities via create_nugget.
+They support workspace resolution for credential lookup.
+
 This makes tool discovery easier for Windsurf while maintaining full functionality.
 """
 
+import json
 from mcp.types import Tool
 from typing import Dict, Any, List
+from tools.workflow_state import resolve_workspace_path, ensure_credentials
 
 # =============================================================================
 # CATEGORY FUNCTION MAPPINGS
@@ -494,10 +499,46 @@ def handle_category_capability(tool_name: str, args: Dict[str, Any]) -> str:
 
     Returns guidance to use the search_ez_functions + create_nugget workflow,
     with the appropriate ez* functions pre-identified based on sub_type.
+
+    Supports workspace resolution for credential lookup.
     """
     sub_type = args.get("sub_type", "unknown")
     agent_id = args.get("agent_id", "{AGENT_ID}")
     jwt_token = args.get("jwt_token")
+
+    # Try to resolve workspace and ensure credentials are tracked
+    resolved_workspace, ws_error = resolve_workspace_path(args)
+
+    # ENFORCE workspace path - must have .eliza/ tracking
+    if ws_error:
+        return json.dumps({
+            "status": "WORKSPACE_REQUIRED",
+            "error": ws_error,
+            "fix": "Provide workspace_path parameter pointing to your project directory. "
+                   "Example: workspace_path='/path/to/your/project'. "
+                   "Or run eliza_workflow(action='start') first to initialize credentials."
+        })
+
+    if resolved_workspace:
+        # Use ensure_credentials to create/verify state - ensures credentials are persisted
+        success, creds, cred_error = ensure_credentials(
+            resolved_workspace,
+            jwt_token=jwt_token or None,
+            agent_id=agent_id if agent_id != "{AGENT_ID}" else None,
+            env=args.get("env", "QA")
+        )
+        if success:
+            # Use credentials returned by ensure_credentials (centralized reading)
+            jwt_token = creds.get("jwt_token") or jwt_token
+            if not agent_id or agent_id == "{AGENT_ID}":
+                agent_id = creds.get("agent_id") or agent_id
+        else:
+            # ensure_credentials failed - return specific error
+            return json.dumps({
+                "status": "CREDENTIALS_REQUIRED",
+                "error": cred_error,
+                "fix": "Provide jwt_token and agent_id parameters, or run eliza_workflow(action='start') first."
+            })
 
     # Get the ez* functions for this category + sub_type
     category_map = CATEGORY_FUNCTION_MAP.get(tool_name, {})

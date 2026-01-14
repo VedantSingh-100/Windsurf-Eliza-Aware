@@ -8,6 +8,9 @@ Pipeline:
 1. search_ez_functions - discover what ez* functions to use
 2. create_nugget - generates code, validates, creates via API
 
+TIER 1 CREATE TOOLS: create_nugget is a CREATE operation that benefits from
+workflow state but can also work with direct jwt_token/agent_id input.
+
 VALIDATION: All inputs are validated before API calls.
 """
 
@@ -18,6 +21,7 @@ from codegen.nugget_generator import generate_nugget_code
 from api.client import COGENGINE_URLS
 from validation.static import validate_code, Severity
 from validation import validate_create_nugget_inputs, format_validation_errors
+from tools.workflow_state import resolve_workspace_path, load_state, is_credentials_only_state, ensure_credentials
 import json
 import os
 import re
@@ -291,6 +295,7 @@ async def handle_create_nugget(args: Dict[str, Any]) -> str:
     - Static validation runs BEFORE any API calls
     - If validation fails, nugget is NOT created
     - This prevents invalid nuggets from being deployed
+    - Supports credential lookup from workflow state
     """
     jwt_token = args.get("jwt_token")
     agent_id = args.get("agent_id")
@@ -306,6 +311,50 @@ async def handle_create_nugget(args: Dict[str, Any]) -> str:
     skip_validation = args.get("skip_validation", False)  # Emergency escape hatch
     env = args.get("env", "QA")
     workspace_path = args.get("workspace_path")  # For writing files to trigger hooks
+
+    # =================================================================
+    # WORKSPACE RESOLUTION AND CREDENTIAL LOOKUP
+    # =================================================================
+    resolved_workspace, ws_error = resolve_workspace_path(args)
+
+    # ENFORCE workspace path - must have .eliza/ tracking
+    if ws_error:
+        return json.dumps({
+            "status": "WORKSPACE_REQUIRED",
+            "error": ws_error,
+            "fix": "Provide workspace_path parameter pointing to your project directory. "
+                   "Example: workspace_path='/path/to/your/project'. "
+                   "Or run eliza_workflow(action='start') first to initialize credentials."
+        })
+
+    if resolved_workspace:
+        workspace_path = workspace_path or resolved_workspace
+
+        # Use ensure_credentials to get credentials (centralized reading)
+        success, creds, cred_error = ensure_credentials(
+            resolved_workspace,
+            jwt_token=jwt_token or None,
+            agent_id=agent_id or None,
+            env=env
+        )
+        if success:
+            # Use credentials returned by ensure_credentials (centralized reading)
+            jwt_token = creds.get("jwt_token") or jwt_token
+            agent_id = creds.get("agent_id") or agent_id
+            env = creds.get("env") or env
+        else:
+            # ensure_credentials failed - return specific error
+            return json.dumps({
+                "status": "CREDENTIALS_REQUIRED",
+                "error": cred_error,
+                "fix": "Provide jwt_token and agent_id parameters, or run eliza_workflow(action='start') first."
+            })
+
+        # Check if state is CREDENTIALS_ONLY (warn but allow)
+        state = load_state(resolved_workspace)
+        if state and is_credentials_only_state(state):
+            # Warn that they're bypassing full workflow
+            print("⚠ Note: Using credentials-only state. Full workflow (eliza_workflow) provides better validation.")
 
     # =================================================================
     # WORKFLOW ENFORCEMENT: Require discovered_functions or skip_search

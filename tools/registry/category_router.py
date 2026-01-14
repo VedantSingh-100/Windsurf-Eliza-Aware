@@ -14,7 +14,12 @@ This ensures Windsurf sees RICH documentation including:
 - "When to use" hints for tool selection
 
 All category tools are STANDALONE - they don't go through eliza_workflow.
-They use credentials from the workflow state if available.
+They use credentials from the workflow state if available, or can lazily initialize
+credentials when jwt_token is provided directly.
+
+Credential Resolution (Jan 2026):
+1. resolve_workspace_path() - Smart discovery of workspace from .eliza/
+2. ensure_credentials() - Lazy initialization if jwt_token provided
 """
 
 import json
@@ -32,12 +37,20 @@ from tools.registry.docstring_extractor import (
     extract_method_docs,
     format_docs_for_description,
 )
+from tools.workflow_state import (
+    resolve_workspace_path,
+    ensure_credentials,
+    load_state,
+)
 from api.client import get_client
 
 
 def get_credentials_from_state(workspace_path: str = None) -> Tuple[Optional[str], str]:
     """
     Get JWT token and environment from workflow state.
+
+    DEPRECATED: Use resolve_workspace_path() + ensure_credentials() instead.
+    Kept for backwards compatibility with existing code.
 
     Returns:
         Tuple of (jwt_token, env) - jwt_token may be None if not set
@@ -297,10 +310,14 @@ async def handle_category_operation(
     """
     Generic handler for any category operation.
 
+    Uses smart workspace discovery and lazy credential initialization:
+    1. resolve_workspace_path() - Finds workspace or asks user
+    2. ensure_credentials() - Uses existing or creates minimal state if jwt_token provided
+
     Args:
         category_name: Name of the category (e.g., "chat_operations")
         arguments: Tool arguments including "operation" and params
-        workspace_path: Path to workspace for credential lookup
+        workspace_path: Path to workspace for credential lookup (deprecated, use arguments)
 
     Returns:
         JSON string with operation result
@@ -342,12 +359,51 @@ async def handle_category_operation(
             "fix": f"Provide values for: {', '.join(missing_params)}"
         })
 
-    # Get credentials from workflow state
-    jwt_token, env = get_credentials_from_state(workspace_path)
+    # Resolve workspace path - smart discovery or explicit parameter
+    resolved_workspace, ws_error = resolve_workspace_path(arguments)
+    if ws_error:
+        # Workspace not found - require explicit workspace_path
+        # Cannot proceed with just jwt_token as credentials won't be persisted
+        return json.dumps({
+            "status": "WORKSPACE_REQUIRED",
+            "error": ws_error,
+            "fix": "Provide workspace_path parameter pointing to your working repository. "
+                   "Example: workspace_path='/path/to/your/repo'"
+        })
+    else:
+        # Workspace found - use ensure_credentials for lazy init
+        jwt_token = arguments.get("jwt_token")
+        agent_id = arguments.get("agent_id")
+        env = arguments.get("env", "QA")
 
-    # Allow override from arguments
-    jwt_token = arguments.get("jwt_token", jwt_token)
-    env = arguments.get("env", env)
+        success, creds, cred_error = ensure_credentials(
+            resolved_workspace,
+            jwt_token=jwt_token,
+            agent_id=agent_id,
+            env=env
+        )
+
+        if not success:
+            return json.dumps({
+                "status": "CREDENTIALS_REQUIRED",
+                "error": cred_error,
+                "fix": "Provide jwt_token parameter, or run eliza_workflow(action='start') first"
+            })
+
+        # Use credentials from state (may have been lazily initialized)
+        env = creds.get("env", env)
+        # If jwt_token not in arguments, we need to read it from .env file
+        if not jwt_token:
+            env_file = os.path.join(resolved_workspace, ".env")
+            if os.path.exists(env_file):
+                try:
+                    with open(env_file, "r") as f:
+                        for line in f:
+                            if line.startswith("ELIZA_JWT_TOKEN="):
+                                jwt_token = line.split("=", 1)[1].strip()
+                                break
+                except IOError:
+                    pass
 
     if not jwt_token:
         return json.dumps({

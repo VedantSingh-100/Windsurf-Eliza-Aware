@@ -35,6 +35,8 @@ try:
         # V2.0 multi-artifact functions
         get_artifact_by_path,
         get_active_artifact,
+        # Credentials-only state detection (Jan 2026)
+        is_credentials_only_state,
     )
     WORKFLOW_AVAILABLE = True
 except ImportError:
@@ -182,6 +184,15 @@ def check_workflow_state(workspace: str, file_path: str) -> list[str]:
             "WORKFLOW_REQUIRED: No workflow state found. "
             "Use the eliza_workflow tool before writing Eliza code. "
             "Call: eliza_workflow(action='start', requirement='your description')"
+        )
+        return errors
+
+    # Check for CREDENTIALS_ONLY state (lazy init - not suitable for CREATE operations)
+    if is_credentials_only_state(state):
+        errors.append(
+            "CREDENTIALS_ONLY: State was created via lazy initialization (for read/execute operations). "
+            "Creating artifacts requires the full workflow. "
+            "Call: eliza_workflow(action='start', requirement='your description', workspace_path='...')"
         )
         return errors
 

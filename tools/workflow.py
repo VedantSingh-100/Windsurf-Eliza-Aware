@@ -59,6 +59,8 @@ from tools.workflow_state import (
     update_artifact_retry,
     can_artifact_retry,
     migrate_v1_to_v2,
+    # Workspace resolution (smart discovery)
+    resolve_workspace_path,
 )
 from search.search import smart_search, get_function_signatures
 from search.index import EZ_FUNCTION_INDEX
@@ -229,7 +231,16 @@ async def handle_eliza_workflow(arguments: Dict[str, Any]) -> Dict[str, Any]:
     V2.0: Supports multi-artifact workflows with discover, switch, list actions.
     """
     action = arguments.get("action", "status")
-    workspace_path = arguments.get("workspace_path", os.getcwd())
+
+    # Resolve workspace path - smart discovery or explicit parameter
+    workspace_path, ws_error = resolve_workspace_path(arguments)
+    if ws_error:
+        return {
+            "status": "WORKSPACE_REQUIRED",
+            "message": ws_error,
+            "next_step": "Provide workspace_path parameter",
+            "example": "eliza_workflow(action='start', workspace_path='/path/to/your/project', ...)"
+        }
 
     # Get or create workflow state (auto-migrates v1 to v2 if needed)
     state = get_or_create_state(workspace_path)

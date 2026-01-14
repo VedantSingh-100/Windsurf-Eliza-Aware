@@ -4,8 +4,10 @@ Document Tools
 Tools for uploading documents to Eliza agents for RAG/Q&A.
 """
 
+import json
 from mcp.types import Tool
 from typing import Dict, Any
+from tools.workflow_state import resolve_workspace_path
 
 DOCUMENT_TOOLS = [
     Tool(
@@ -67,6 +69,18 @@ EXAMPLE TRIGGERS: "upload document", "add PDF", "upload file", "add to knowledge
 
 def create_document_upload(args: Dict[str, Any]) -> str:
     """Generate document upload code."""
+    # ENFORCE workspace path - must have .eliza/ tracking
+    resolved_workspace, ws_error = resolve_workspace_path(args)
+
+    if ws_error:
+        return json.dumps({
+            "status": "WORKSPACE_REQUIRED",
+            "error": ws_error,
+            "fix": "Provide workspace_path parameter pointing to your project directory. "
+                   "Example: workspace_path='/path/to/your/project'. "
+                   "Or run eliza_workflow(action='start') first to initialize credentials."
+        })
+
     agent_id = args.get("agent_id", "{AGENT_ID}")
     upload_type = args.get("upload_type", "file")
     chunking = args.get("chunking_strategy", "RECURSIVE_CHARACTER_SPLIT")
