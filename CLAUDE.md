@@ -24,6 +24,37 @@ python server.py
 
 ## Architecture
 
+### Lazy Discovery Mode (Default - Recommended)
+
+The server supports **lazy discovery mode** which reduces context load by ~87% (from ~15,000 to ~2,000 tokens).
+
+**How it works:** Instead of loading all 46 tools upfront, only 4 meta-tools are exposed:
+
+| Meta-Tool | Description |
+|-----------|-------------|
+| `eliza_workflow` | MANDATORY orchestrator (always visible) |
+| `discover_tools` | Browse/search tools by category |
+| `get_tool_schema` | Get full schema on-demand |
+| `execute_tool` | Execute any tool by name |
+
+**Workflow in lazy mode:**
+1. `discover_tools(category="create")` - Find the right tool
+2. `get_tool_schema(tool_name="create_nugget")` - Get full parameters
+3. `execute_tool(tool_name="create_nugget", arguments={...})` - Execute it
+
+**Toggle modes:**
+```bash
+# Lazy mode (default) - 4 meta-tools
+python server.py
+
+# Legacy mode - all 46 tools
+ELIZA_MCP_LAZY_MODE=false python server.py
+```
+
+**Key files:**
+- `tools/hierarchy.py` - Category tree and tool registry
+- `tools/meta/` - Meta-tool implementations (discover, execute, schema_loader)
+
 ### Mandatory Workflow System
 
 **Critical:** All Eliza tasks MUST go through `eliza_workflow` tool. This is enforced by `.windsurfrules` and hook scripts.
@@ -87,6 +118,8 @@ These tools expose 75 API endpoints via a category+operation pattern:
 ### Key Directories
 
 - `tools/` - All 46 MCP tool implementations, `workflow.py` is the orchestrator
+- `tools/meta/` - Meta-tools for lazy discovery (discover, execute, schema_loader)
+- `tools/hierarchy.py` - Category tree mapping all 46 tools
 - `tools/registry/` - Scalable tool registry and category router for operation tools
 - `tools/operations/` - Operation tool exports (19 handlers)
 - `validation/` - AST-based code validation (no execution), input validators
@@ -106,6 +139,23 @@ Pre/post-write hooks (`.windsurf/hooks.json`) enforce workflow completion and va
 ### CogEngine Environments
 
 DEV, TEST, QA, PROD environments available via `api/client.py`. Uses SSL certificate handling for internal BNY certs.
+
+## Confirmation System for Destructive Operations
+
+Mutation operations (delete, update) require **deterministic confirmation** - enforced in code, not prompts.
+
+**How it works:**
+1. First call without `confirm_token` → Returns confirmation request with impact details
+2. Cascade shows user: "I'm about to DELETE 'Agent Name'. Proceed?"
+3. User confirms → Cascade calls with `confirm_token`
+4. Tool validates token and executes
+
+**Operations requiring confirmation:**
+- Delete: `delete_agent`, `delete_nugget`, `delete_function`
+- Update: `update_agent`, `update_nugget`
+
+**Key files:**
+- `tools/confirmation.py` - Token generation, validation, `@require_confirmation` decorator
 
 ## Development Rules (from .windsurfrules)
 

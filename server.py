@@ -6,22 +6,33 @@ Model Context Protocol server for generating and validating Eliza AI platform co
 Provides tools for creating agents, nuggets, functions, and more.
 
 TOOL ARCHITECTURE (Jan 2026):
-- 7 Core tools: Agent creation, nugget workflow, documents, validation
-- 6 Category tools: Communication, Integration, AI, Automation, Data, Interop
-- 2 Reference tools: API endpoints, valid values
-- 11 CRUD tools: Agent, nugget, and function management
-- 19 Operation tools: Category-based API routing exposing 75 endpoints
+- LAZY MODE (default): 4 meta-tools for ~87% context reduction
+  - discover_tools: Browse/search tools by category
+  - eliza_workflow: MANDATORY orchestrator (always visible)
+  - execute_tool: Execute any tool by name
+  - get_tool_schema: Get full schema on-demand
 
-Total: 46 tools (27 original + 19 operation tools exposing 75 API endpoints)
+- LEGACY MODE: All 46 tools exposed directly
+  - 7 Core tools: Agent creation, nugget workflow, documents, validation
+  - 6 Category tools: Communication, Integration, AI, Automation, Data, Interop
+  - 2 Reference tools: API endpoints, valid values
+  - 11 CRUD tools: Agent, nugget, and function management
+  - 19 Operation tools: Category-based API routing exposing 75 endpoints
+
+Set ELIZA_MCP_LAZY_MODE=false to use legacy mode.
 
 Usage:
     python -m eliza_mcp.server
 """
 
 import asyncio
+import os
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent
+
+# Lazy mode toggle - set ELIZA_MCP_LAZY_MODE=false to use legacy 46-tool mode
+LAZY_MODE = os.getenv("ELIZA_MCP_LAZY_MODE", "true").lower() != "false"
 
 from tools import (
     ALL_TOOLS,
@@ -80,24 +91,65 @@ from tools import (
     handle_discovery_operations,
 )
 
+# Meta-tools for lazy mode (import only the workflow tool definition for always-visible)
+from tools.workflow import WORKFLOW_TOOLS
+from tools.meta import (
+    META_TOOLS,
+    handle_discover_tools,
+    handle_execute_tool,
+    handle_get_tool_schema,
+)
+
+# Combine meta-tools with always-visible workflow tool
+LAZY_MODE_TOOLS = WORKFLOW_TOOLS + META_TOOLS
+
 # Create server instance
 server = Server("eliza-mcp")
 
 
 @server.list_tools()
 async def list_tools():
-    """Return all available tools."""
-    return ALL_TOOLS
+    """
+    Return available tools based on mode.
+
+    LAZY_MODE (default): Returns 4 meta-tools for ~87% context reduction
+    LEGACY_MODE: Returns all 46 tools
+    """
+    if LAZY_MODE:
+        return LAZY_MODE_TOOLS  # 4 tools: discover_tools, eliza_workflow, execute_tool, get_tool_schema
+    else:
+        return ALL_TOOLS  # 46 tools (legacy mode)
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Handle tool calls."""
+    """
+    Handle tool calls.
+
+    In LAZY_MODE, handles meta-tools directly.
+    All other tools are handled via execute_tool or legacy mode.
+    """
+
+    # =========================================================================
+    # META-TOOLS (3) - For lazy discovery pattern
+    # =========================================================================
+    if name == "discover_tools":
+        result = await handle_discover_tools(arguments)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "execute_tool":
+        result = await handle_execute_tool(arguments)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "get_tool_schema":
+        result = await handle_get_tool_schema(arguments)
+        return [TextContent(type="text", text=result)]
 
     # =========================================================================
     # WORKFLOW ORCHESTRATOR (1) - MANDATORY for all Eliza tasks
+    # Always available in both lazy and legacy modes
     # =========================================================================
-    if name == "eliza_workflow":
+    elif name == "eliza_workflow":
         result = await handle_eliza_workflow(arguments)
         # Format result as markdown for readability
         import json
@@ -244,7 +296,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         result = await handle_discovery_operations(arguments)
 
     else:
-        result = f"Unknown tool: {name}. Available tools: {[t.name for t in ALL_TOOLS]}"
+        # In lazy mode, guide user to use meta-tools
+        if LAZY_MODE:
+            result = (
+                f"Unknown tool: {name}.\n\n"
+                f"In lazy mode, use these tools:\n"
+                f"- discover_tools: Browse/search available tools\n"
+                f"- get_tool_schema: Get full parameter schema\n"
+                f"- execute_tool: Execute any tool by name\n"
+                f"- eliza_workflow: MANDATORY for Eliza tasks\n\n"
+                f"Example: discover_tools(search='{name}')"
+            )
+        else:
+            result = f"Unknown tool: {name}. Available tools: {[t.name for t in ALL_TOOLS]}"
 
     return [TextContent(type="text", text=result)]
 

@@ -27,6 +27,12 @@ from tools.workflow_state import (
     resolve_workspace_path,
     ensure_credentials,
 )
+from tools.confirmation import (
+    require_confirmation,
+    create_confirmation_request,
+    validate_confirmation,
+    get_target_description,
+)
 
 
 # =============================================================================
@@ -78,7 +84,10 @@ UPDATABLE FIELDS:
 - controlFlags: List of control flags
 - retrieverStrategy: RAG strategy (STANDARD, REASON, etc.)
 
-USE THIS WHEN: User wants to modify agent settings, update prompts, or change model.""",
+USE THIS WHEN: User wants to modify agent settings, update prompts, or change model.
+
+CONFIRMATION REQUIRED: First call without confirm_token returns a confirmation request.
+Call again with the confirm_token to execute the update.""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -102,6 +111,10 @@ USE THIS WHEN: User wants to modify agent settings, update prompts, or change mo
                         "retrieverStrategy": {"type": "string"}
                     }
                 },
+                "confirm_token": {
+                    "type": "string",
+                    "description": "Confirmation token from previous call (required to execute update)"
+                },
                 "env": {
                     "type": "string",
                     "enum": ["DEV", "TEST", "QA", "PROD"],
@@ -119,7 +132,9 @@ USE THIS WHEN: User wants to modify agent settings, update prompts, or change mo
 WARNING: This action is irreversible. All nuggets and functions on the agent will also be deleted.
 
 USE THIS WHEN: User explicitly requests agent deletion.
-REQUIRES: confirm=true to prevent accidental deletion.""",
+
+CONFIRMATION REQUIRED: First call without confirm_token returns a confirmation request.
+Call again with the confirm_token to execute the deletion.""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -131,9 +146,9 @@ REQUIRES: confirm=true to prevent accidental deletion.""",
                     "type": "string",
                     "description": "UUID of the agent to delete"
                 },
-                "confirm": {
-                    "type": "boolean",
-                    "description": "Must be true to confirm deletion"
+                "confirm_token": {
+                    "type": "string",
+                    "description": "Confirmation token from previous call (required to execute deletion)"
                 },
                 "env": {
                     "type": "string",
@@ -142,7 +157,7 @@ REQUIRES: confirm=true to prevent accidental deletion.""",
                     "description": "Environment"
                 }
             },
-            "required": ["jwt_token", "agent_id", "confirm"]
+            "required": ["jwt_token", "agent_id"]
         }
     ),
     Tool(
@@ -225,7 +240,10 @@ UPDATABLE FIELDS:
 - call: Code block with @type, language, and code
 
 USE THIS WHEN: User wants to modify nugget code, fix bugs, or update behavior.
-NOTE: For major changes, consider using create_nugget to generate new code.""",
+NOTE: For major changes, consider using create_nugget to generate new code.
+
+CONFIRMATION REQUIRED: First call without confirm_token returns a confirmation request.
+Call again with the confirm_token to execute the update.""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -257,6 +275,10 @@ NOTE: For major changes, consider using create_nugget to generate new code.""",
                         }
                     }
                 },
+                "confirm_token": {
+                    "type": "string",
+                    "description": "Confirmation token from previous call (required to execute update)"
+                },
                 "env": {
                     "type": "string",
                     "enum": ["DEV", "TEST", "QA", "PROD"],
@@ -274,7 +296,9 @@ NOTE: For major changes, consider using create_nugget to generate new code.""",
 WARNING: This also removes any functions that reference this nugget.
 
 USE THIS WHEN: User explicitly requests nugget deletion.
-REQUIRES: confirm=true to prevent accidental deletion.""",
+
+CONFIRMATION REQUIRED: First call without confirm_token returns a confirmation request.
+Call again with the confirm_token to execute the deletion.""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -290,9 +314,9 @@ REQUIRES: confirm=true to prevent accidental deletion.""",
                     "type": "string",
                     "description": "ID of the nugget to delete"
                 },
-                "confirm": {
-                    "type": "boolean",
-                    "description": "Must be true to confirm deletion"
+                "confirm_token": {
+                    "type": "string",
+                    "description": "Confirmation token from previous call (required to execute deletion)"
                 },
                 "env": {
                     "type": "string",
@@ -301,7 +325,7 @@ REQUIRES: confirm=true to prevent accidental deletion.""",
                     "description": "Environment"
                 }
             },
-            "required": ["jwt_token", "agent_id", "nugget_id", "confirm"]
+            "required": ["jwt_token", "agent_id", "nugget_id"]
         }
     ),
     Tool(
@@ -385,7 +409,9 @@ USE THIS WHEN: User wants to view function configuration.""",
 NOTE: The underlying nugget remains; only the function binding is removed.
 
 USE THIS WHEN: User wants to remove a function but keep the nugget code.
-REQUIRES: confirm=true to prevent accidental deletion.""",
+
+CONFIRMATION REQUIRED: First call without confirm_token returns a confirmation request.
+Call again with the confirm_token to execute the deletion.""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -401,9 +427,9 @@ REQUIRES: confirm=true to prevent accidental deletion.""",
                     "type": "string",
                     "description": "ID of the function to delete"
                 },
-                "confirm": {
-                    "type": "boolean",
-                    "description": "Must be true to confirm deletion"
+                "confirm_token": {
+                    "type": "string",
+                    "description": "Confirmation token from previous call (required to execute deletion)"
                 },
                 "env": {
                     "type": "string",
@@ -412,7 +438,7 @@ REQUIRES: confirm=true to prevent accidental deletion.""",
                     "description": "Environment"
                 }
             },
-            "required": ["jwt_token", "agent_id", "function_id", "confirm"]
+            "required": ["jwt_token", "agent_id", "function_id"]
         }
     ),
     Tool(
@@ -575,6 +601,7 @@ System Prompt:
 {result.get('systemPrompt', 'N/A')}"""
 
 
+@require_confirmation("Modify agent '{target}' configuration")
 def handle_update_agent(args: Dict[str, Any]) -> str:
     """Update agent configuration."""
     client, error = _validate_and_get_client(args)
@@ -598,6 +625,7 @@ Agent ID: {agent_id}
 Updated fields: {', '.join(updates.keys())}"""
 
 
+@require_confirmation("Permanently delete agent '{target}' and all its nuggets/functions")
 def handle_delete_agent(args: Dict[str, Any]) -> str:
     """Delete an agent."""
     client, error = _validate_and_get_client(args)
@@ -605,13 +633,6 @@ def handle_delete_agent(args: Dict[str, Any]) -> str:
         return f"VALIDATION FAILED\n{error}"
 
     agent_id = args["agent_id"]
-    confirm = args.get("confirm", False)
-
-    if not confirm:
-        return """DELETE CANCELLED
-
-You must set confirm=true to delete an agent.
-WARNING: This action is irreversible. All nuggets and functions will be deleted."""
 
     success, result = client.delete_agent(agent_id)
 
@@ -691,6 +712,7 @@ CODE:
 ```"""
 
 
+@require_confirmation("Modify nugget '{target}' configuration")
 def handle_update_nugget(args: Dict[str, Any]) -> str:
     """Update nugget code or configuration."""
     client, error = _validate_and_get_client(args)
@@ -719,6 +741,7 @@ Nugget ID: {nugget_id}
 Updated fields: {', '.join(updates.keys())}"""
 
 
+@require_confirmation("Permanently delete nugget '{target}' and any associated functions")
 def handle_delete_nugget(args: Dict[str, Any]) -> str:
     """Delete a nugget."""
     client, error = _validate_and_get_client(args)
@@ -727,16 +750,9 @@ def handle_delete_nugget(args: Dict[str, Any]) -> str:
 
     agent_id = args["agent_id"]
     nugget_id = args.get("nugget_id", "")
-    confirm = args.get("confirm", False)
 
     if not nugget_id:
         return "ERROR: nugget_id is required"
-
-    if not confirm:
-        return """DELETE CANCELLED
-
-You must set confirm=true to delete a nugget.
-WARNING: This will also remove any functions that reference this nugget."""
 
     success, result = client.delete_nugget(agent_id, nugget_id)
 
@@ -820,6 +836,7 @@ Prompt: {result.get('prompt', 'N/A')}
 Parameters:{params_str}"""
 
 
+@require_confirmation("Remove function '{target}' from agent (nugget will remain)")
 def handle_delete_function(args: Dict[str, Any]) -> str:
     """Delete a function."""
     client, error = _validate_and_get_client(args)
@@ -828,16 +845,9 @@ def handle_delete_function(args: Dict[str, Any]) -> str:
 
     agent_id = args["agent_id"]
     function_id = args.get("function_id", "")
-    confirm = args.get("confirm", False)
 
     if not function_id:
         return "ERROR: function_id is required"
-
-    if not confirm:
-        return """DELETE CANCELLED
-
-You must set confirm=true to delete a function.
-NOTE: The underlying nugget will remain; only the function binding is removed."""
 
     success, result = client.delete_function(agent_id, function_id)
 
